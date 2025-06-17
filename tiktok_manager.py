@@ -53,6 +53,9 @@ class TikTokManager:
             bool: True, если загрузка запущена успешно, False в случае ошибки
         """
         try:
+            # Проверяем и обрабатываем окно согласия на cookie, если оно появилось
+            await self.handle_cookie_consent(page)
+            
             # Найдем input для загрузки файла
             file_input = await page.query_selector('input[type="file"]')
             
@@ -259,6 +262,9 @@ class TikTokManager:
                 await page.goto("https://tiktok.com", wait_until='load')
                 await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
                 
+                # Обрабатываем диалог согласия на cookie на главной странице
+                await self.handle_cookie_consent(page)
+                
                 # Проверяем, авторизованы ли мы
                 is_authenticated = await self.check_authentication(page)
                 
@@ -266,6 +272,9 @@ class TikTokManager:
                     # Переходим на страницу загрузки
                     await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='load')
                     await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
+                    
+                    # Обрабатываем диалог согласия на cookie на странице загрузки
+                    await self.handle_cookie_consent(page)
                     
                     # Делаем скриншот страницы загрузки
                     await page.screenshot(path="tiktok_upload_page.png")
@@ -333,4 +342,93 @@ class TikTokManager:
             
         except Exception as e:
             print(f"Ошибка при проверке авторизации: {str(e)}")
+            return False
+    
+    async def handle_cookie_consent(self, page):
+        """Обрабатывает диалоговое окно с согласием на использование cookie, если оно появилось"""
+        try:
+            print("Проверяем наличие диалога согласия на cookie...")
+            
+            # Пытаемся найти диалоговое окно с кнопками согласия на cookie
+            # Способ 1: Ищем по классу обертки кнопок
+            cookie_dialog = await page.query_selector('div.button-wrapper.special-button-wrapper')
+            
+            if cookie_dialog:
+                print("Найдено окно согласия на cookie (по классу обертки)")
+                
+                # Пытаемся найти любую из кнопок согласия или отказа
+                # Так как язык может отличаться, ищем все кнопки внутри специальной обертки
+                consent_buttons = await cookie_dialog.query_selector_all('button')
+                
+                if consent_buttons and len(consent_buttons) > 0:
+                    # Нажимаем на последнюю кнопку (обычно это кнопка согласия)
+                    button_to_click = consent_buttons[-1]  # Берем последнюю кнопку (обычно это "Разрешить все")
+                    
+                    # Получаем текст кнопки для лога
+                    button_text = await button_to_click.inner_text()
+                    print(f"Нажимаем на кнопку с текстом: '{button_text}'")
+                    
+                    await button_to_click.click()
+                    print("Кнопка в окне согласия на cookie нажата")
+                    
+                    # Даем время на обработку нажатия
+                    await page.wait_for_timeout(2000)
+                    return True
+            
+            # Способ 2: Ищем кнопки по содержимому текста, связанного с cookie
+            possible_buttons = await page.query_selector_all('button:has-text("cookie"), button:has-text("Cookie"), button:has-text("Accept"), button:has-text("Принять"), button:has-text("Allow"), button:has-text("Разрешить"), button:has-text("Agree"), button:has-text("Consent"), button:has-text("OK")')
+            
+            if possible_buttons and len(possible_buttons) > 0:
+                print("Найдена кнопка согласия на cookie (по тексту)")
+                button_to_click = possible_buttons[0]
+                button_text = await button_to_click.inner_text()
+                print(f"Нажимаем на кнопку с текстом: '{button_text}'")
+                
+                await button_to_click.click()
+                print("Кнопка согласия на cookie нажата")
+                
+                await page.wait_for_timeout(2000)
+                return True
+                
+            # Способ 3: Ищем элементы с data-атрибутами, которые часто используются в диалогах cookie
+            cookie_elements = await page.query_selector_all('[data-cookiebanner], [data-testid*="cookie"], [id*="cookie"], [id*="consent"], [class*="consent"], [class*="cookie"]')
+            
+            if cookie_elements and len(cookie_elements) > 0:
+                print("Найден элемент диалога cookie (по data-атрибутам)")
+                
+                # Ищем внутри этих элементов кнопки
+                for element in cookie_elements:
+                    buttons = await element.query_selector_all('button')
+                    if buttons and len(buttons) > 0:
+                        # Предпочтительно нажать на кнопку согласия (обычно это последняя кнопка)
+                        button_to_click = buttons[-1]
+                        button_text = await button_to_click.inner_text()
+                        print(f"Нажимаем на кнопку с текстом: '{button_text}'")
+                        
+                        await button_to_click.click()
+                        print("Кнопка в окне согласия на cookie нажата")
+                        
+                        await page.wait_for_timeout(2000)
+                        return True
+            
+            # Способ 4: Проверка конкретно для TikTok (если у них есть специфичный формат)
+            tiktok_consent_button = await page.query_selector('[data-e2e*="cookie-banner"] button, [data-e2e*="accept"] button')
+            
+            if tiktok_consent_button:
+                print("Найдена кнопка согласия на cookie (специфичная для TikTok)")
+                button_text = await tiktok_consent_button.inner_text()
+                print(f"Нажимаем на кнопку с текстом: '{button_text}'")
+                
+                await tiktok_consent_button.click()
+                print("Кнопка согласия на cookie TikTok нажата")
+                
+                await page.wait_for_timeout(2000)
+                return True
+            
+            print("Окно согласия на cookie не найдено или уже обработано")
+            return False
+            
+        except Exception as e:
+            print(f"Ошибка при обработке диалога согласия на cookie: {str(e)}")
+            await page.screenshot(path="cookie_consent_error.png")
             return False 
