@@ -6,6 +6,7 @@ import traceback
 import shutil
 from playwright.async_api import async_playwright
 import glob
+import aiohttp
 from tiktok_cookies_loader import CookiesLoader
 
 class TikTokManager:
@@ -18,6 +19,7 @@ class TikTokManager:
             'username': 'xefrudrjaz-corp.res-country-GB-hold-session-session-6850a0db0a053',
             'password': '8tnmD7aIgSbBHSmD'
         }
+        self.proxy_refresh_url = "https://api.asocks.com/user/port/refresh/ip/fc20ca0b-4b04-11f0-8ac2-bc24114c89e8"
         
         # Создаем директории, если они не существуют
         if not os.path.exists(videos_dir):
@@ -190,6 +192,35 @@ class TikTokManager:
             print(f"Ошибка при проверке успешности публикации: {str(e)}")
             return False
     
+    async def refresh_proxy_ip(self):
+        """Обновляет IP-адрес прокси перед работой с аккаунтом"""
+        try:
+            print("Обновление IP-адреса прокси...")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.proxy_refresh_url) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+                        if response_data.get("success"):
+                            session_id = response_data.get("session")
+                            login = response_data.get("login")
+                            print(f"IP прокси успешно обновлен. Сессия: {session_id}")
+                            
+                            # Обновляем логин прокси с новой сессией
+                            if session_id and login:
+                                self.proxy['username'] = login
+                                print(f"Обновлен логин прокси: {login}")
+                            
+                            return True
+                        else:
+                            print("Ошибка при обновлении IP: сервер вернул успех=false")
+                            return False
+                    else:
+                        print(f"Ошибка при обновлении IP прокси. Код ответа: {response.status}")
+                        return False
+        except Exception as e:
+            print(f"Ошибка при обновлении IP прокси: {str(e)}")
+            return False
+    
     async def process_account(self, cookie_file):
         """Обрабатывает один файл с куками"""
         print(f"Обработка файла с куками: {cookie_file}")
@@ -206,6 +237,11 @@ class TikTokManager:
         if not video_path:
             print("Не удалось найти видео для загрузки. Убедитесь, что в папке videos есть видео файлы.")
             return False
+        
+        # Обновляем IP прокси перед работой с аккаунтом
+        proxy_refreshed = await self.refresh_proxy_ip()
+        if not proxy_refreshed:
+            print("Предупреждение: Не удалось обновить IP прокси, но продолжаем с текущим IP")
         
         try:
             async with async_playwright() as p:
