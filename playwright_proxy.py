@@ -8,7 +8,7 @@ def load_cookies(filename='cookies.json'):
     with open(filename, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def get_first_video(folder_path='tt_video'):
+def get_first_video(folder_path='videos'):
     """Получает путь к первому видео в указанной папке."""
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
@@ -77,7 +77,7 @@ async def run():
     # Получаем путь к первому видео
     video_path = get_first_video()
     if not video_path:
-        print("Не удалось найти видео для загрузки. Убедитесь, что в папке tt_video есть видео файлы.")
+        print("Не удалось найти видео для загрузки. Убедитесь, что в папке videos есть видео файлы.")
         return
 
     proxy = {
