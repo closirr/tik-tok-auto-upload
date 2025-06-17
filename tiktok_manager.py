@@ -69,7 +69,15 @@ class TikTokManager:
                 await page.screenshot(path="tiktok_file_selected.png")
                 
                 # Ждем достаточное время для завершения загрузки и обработки
-                await page.wait_for_timeout(30000)  # 30 секунд
+                print("Ждем загрузку видео...")
+                await page.wait_for_timeout(8000)  # 8 секунд
+                
+                # Проверяем наличие дополнительных форм или шагов
+                await self.handle_additional_forms(page)
+                
+                # Публикуем видео
+                publication_result = await self.publish_video(page)
+                
                 return True
                 
             else:
@@ -79,6 +87,107 @@ class TikTokManager:
         except Exception as e:
             print(f"Ошибка при загрузке видео: {str(e)}")
             await page.screenshot(path="tiktok_upload_error.png")
+            return False
+            
+    async def publish_video(self, page):
+        """Публикует загруженное видео, нажимая на кнопку 'Опубликовать'"""
+        try:
+            # Нажимаем на кнопку "Опубликовать"
+            print("Ищем кнопку 'Опубликовать'...")
+            publish_button = await page.query_selector('[data-e2e="post_video_button"]')
+            
+            if publish_button:
+                print("Нажимаем на кнопку 'Опубликовать'")
+                await publish_button.click()
+                print("Видео отправлено на публикацию")
+                await page.wait_for_timeout(5000)  # Ждем 5 секунд после публикации
+                await page.screenshot(path="tiktok_published.png")
+                
+                # Проверяем успешность публикации
+                success = await self.check_publication_success(page)
+                if success:
+                    print("Видео успешно опубликовано")
+                    return True
+                else:
+                    print("Не удалось подтвердить успешность публикации")
+                    return False
+            else:
+                print("Кнопка 'Опубликовать' не найдена")
+                # Попробуем найти другие элементы с похожим текстом
+                button = await page.query_selector('button:has-text("Опубликовать")')
+                if button:
+                    print("Найдена кнопка с текстом 'Опубликовать', нажимаем")
+                    await button.click()
+                    print("Видео отправлено на публикацию")
+                    await page.wait_for_timeout(5000)
+                    await page.screenshot(path="tiktok_published.png")
+                    
+                    # Проверяем успешность публикации
+                    success = await self.check_publication_success(page)
+                    if success:
+                        print("Видео успешно опубликовано")
+                        return True
+                    else:
+                        print("Не удалось подтвердить успешность публикации")
+                        return False
+                else:
+                    print("Не удалось найти кнопку публикации")
+                    await page.screenshot(path="tiktok_no_publish_button.png")
+                    return False
+        except Exception as e:
+            print(f"Ошибка при публикации видео: {str(e)}")
+            await page.screenshot(path="tiktok_publish_error.png")
+            return False
+    
+    async def handle_additional_forms(self, page):
+        """Обрабатывает дополнительные формы или шаги публикации, если они есть"""
+        try:
+            # Проверяем наличие формы описания
+            description_field = await page.query_selector('textarea[placeholder*="опис"], textarea[placeholder*="Напиш"]')
+            if description_field:
+                print("Найдено поле для описания видео, заполняем")
+                await description_field.fill("🔥 #viral #trending")
+                
+            # Проверяем наличие кнопок "Далее" или "Продолжить"
+            next_button = await page.query_selector('button:has-text("Далее"), button:has-text("Продолжить"), button:has-text("Next"), [data-e2e="next-button"]')
+            if next_button:
+                print("Найдена кнопка 'Далее', нажимаем")
+                await next_button.click()
+                await page.wait_for_timeout(3000)
+                
+                # Возможно, есть еще шаги - рекурсивно проверяем
+                await self.handle_additional_forms(page)
+        
+        except Exception as e:
+            print(f"Ошибка при обработке дополнительных форм: {str(e)}")
+            
+    async def check_publication_success(self, page):
+        """Проверяет успешность публикации видео"""
+        try:
+            # Ждем, пока появится сообщение об успехе или истечет таймаут
+            success_message = None
+            try:
+                # Ищем разные варианты сообщений об успешной публикации
+                success_message = await page.wait_for_selector(
+                    'text="успешно", text="опубликовано", text="published", text="success"', 
+                    timeout=10000
+                )
+            except:
+                pass
+                
+            if success_message:
+                print("Найдено сообщение об успешной публикации")
+                return True
+                
+            # Проверяем, перенаправились ли мы на страницу со списком видео
+            if '/tiktokstudio/content' in page.url or '/creator' in page.url:
+                print("Перенаправлены на страницу контента, публикация успешна")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            print(f"Ошибка при проверке успешности публикации: {str(e)}")
             return False
     
     async def process_account(self, cookie_file):
@@ -129,13 +238,13 @@ class TikTokManager:
                     upload_success = await self.upload_video(page, video_path)
                     
                     if upload_success:
-                        print("Загрузка видео запущена успешно")
+                        print("Загрузка и публикация видео выполнены")
                         self.cookies_loader.mark_cookie_as_valid(cookie_file)
                         # Ждем некоторое время перед закрытием браузера
                         await page.wait_for_timeout(10000)  # 10 секунд
                         return True
                     else:
-                        print("Не удалось запустить загрузку видео")
+                        print("Не удалось загрузить или опубликовать видео")
                         self.cookies_loader.mark_cookie_as_invalid(cookie_file)
                         return False
                 else:
