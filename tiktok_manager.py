@@ -8,22 +8,107 @@ from playwright.async_api import async_playwright
 import glob
 import aiohttp
 from tiktok_cookies_loader import CookiesLoader
+import datetime
+import config  # Импортируем файл конфигурации
 
 class TikTokManager:
-    def __init__(self, cookies_dir='cookies', videos_dir='videos'):
+    def __init__(self, cookies_dir=config.DEFAULT_COOKIES_DIR, videos_dir=config.DEFAULT_VIDEOS_DIR, screenshots_dir=config.DEFAULT_SCREENSHOTS_DIR):
         self.cookies_dir = cookies_dir
         self.videos_dir = videos_dir
+        self.screenshots_dir = screenshots_dir
         self.cookies_loader = CookiesLoader(cookies_dir)
-        self.proxy = {
-            'server': 'http://109.236.82.42:9999',
-            'username': 'xefrudrjaz-corp.res-country-GB-hold-session-session-6850a0db0a053',
-            'password': '8tnmD7aIgSbBHSmD'
-        }
-        self.proxy_refresh_url = "https://api.asocks.com/user/port/refresh/ip/fc20ca0b-4b04-11f0-8ac2-bc24114c89e8"
+        self.current_screenshot_dir = None
+        self.proxy = config.PROXY  # Используем прокси из файла конфигурации
+        self.proxy_refresh_url = config.PROXY_REFRESH_URL  # Используем URL для обновления IP из файла конфигурации
         
         # Создаем директории, если они не существуют
-        if not os.path.exists(videos_dir):
-            os.makedirs(videos_dir)
+        for directory in [videos_dir, cookies_dir, screenshots_dir]:
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            
+    def prepare_screenshot_directory(self, cookie_file):
+        """
+        Создает директорию для скриншотов текущей сессии работы с cookie-файлом
+        
+        Args:
+            cookie_file: Имя cookie-файла, для которого создается директория
+        
+        Returns:
+            str: Путь к созданной директории для скриншотов
+        """
+        # Извлекаем имя файла без расширения
+        cookie_name = os.path.basename(cookie_file).split('.')[0]
+        
+        # Добавляем метку времени для уникальности
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Создаем директорию с именем cookie-файла
+        screenshot_dir = os.path.join(self.screenshots_dir, f"{cookie_name}_{timestamp}")
+        os.makedirs(screenshot_dir, exist_ok=True)
+        
+        # Сохраняем путь для последующего использования
+        self.current_screenshot_dir = screenshot_dir
+        
+        print(f"Создана директория для скриншотов: {screenshot_dir}")
+        return screenshot_dir
+    
+    def mark_screenshot_directory(self, cookie_file, is_valid):
+        """
+        Переименовывает директорию скриншотов, добавляя статус валидности cookie
+        
+        Args:
+            cookie_file: Имя cookie-файла
+            is_valid: Флаг валидности cookie (True/False/None)
+                      None означает, что проверка была пропущена из-за ошибки соединения
+        """
+        if not self.current_screenshot_dir or not os.path.exists(self.current_screenshot_dir):
+            print("Директория для скриншотов не существует")
+            return
+        
+        # Получаем базовое имя текущей директории
+        base_dir = os.path.dirname(self.current_screenshot_dir)
+        current_dir_name = os.path.basename(self.current_screenshot_dir)
+        
+        # Формируем новое имя со статусом в начале
+        if is_valid is None:
+            status = "skipped"  # Для случаев с ошибками SSL/прокси
+        else:
+            status = "valid" if is_valid else "invalid"
+            
+        new_dir_name = f"{status}_{current_dir_name}"
+        new_dir_path = os.path.join(base_dir, new_dir_name)
+        
+        # Переименовываем директорию
+        try:
+            os.rename(self.current_screenshot_dir, new_dir_path)
+            self.current_screenshot_dir = new_dir_path
+            print(f"Директория скриншотов помечена как {status}: {new_dir_path}")
+        except Exception as e:
+            print(f"Ошибка при переименовании директории скриншотов: {str(e)}")
+    
+    async def take_screenshot(self, page, filename):
+        """
+        Делает скриншот страницы и сохраняет его в директорию текущей сессии
+        
+        Args:
+            page: Объект страницы Playwright
+            filename: Имя файла для скриншота
+        
+        Returns:
+            str: Путь к сохраненному скриншоту или None в случае ошибки
+        """
+        if not self.current_screenshot_dir:
+            print("ВНИМАНИЕ: Директория для скриншотов не создана, скриншот будет сохранен в корне")
+            return await page.screenshot(path=filename)
+        
+        screenshot_path = os.path.join(self.current_screenshot_dir, filename)
+        try:
+            await page.screenshot(path=screenshot_path)
+            print(f"Скриншот сохранен: {screenshot_path}")
+            return screenshot_path
+        except Exception as e:
+            print(f"Ошибка при сохранении скриншота: {str(e)}")
+            return None
             
     def get_first_video(self):
         """Получает путь к первому видео в указанной папке."""
@@ -71,11 +156,11 @@ class TikTokManager:
                 
                 # Делаем скриншот после выбора файла
                 await page.wait_for_timeout(2000)
-                await page.screenshot(path="tiktok_file_selected.png")
+                await self.take_screenshot(page, "tiktok_file_selected.png")
                 
                 # Ждем достаточное время для завершения загрузки и обработки
                 print("Ждем загрузку видео...")
-                await page.wait_for_timeout(8000)  # 8 секунд
+                await page.wait_for_timeout(3000)  # 8 секунд
                 
                 # Проверяем наличие дополнительных форм или шагов
                 await self.handle_additional_forms(page)
@@ -91,7 +176,7 @@ class TikTokManager:
         
         except Exception as e:
             print(f"Ошибка при загрузке видео: {str(e)}")
-            await page.screenshot(path="tiktok_upload_error.png")
+            await self.take_screenshot(page, "tiktok_upload_error.png")
             return False
             
     async def publish_video(self, page):
@@ -106,7 +191,7 @@ class TikTokManager:
                 await publish_button.click()
                 print("Видео отправлено на публикацию")
                 await page.wait_for_timeout(5000)  # Ждем 5 секунд после публикации
-                await page.screenshot(path="tiktok_published.png")
+                await self.take_screenshot(page, "tiktok_published.png")
                 
                 # Проверяем успешность публикации
                 success = await self.check_publication_success(page)
@@ -125,7 +210,7 @@ class TikTokManager:
                     await button.click()
                     print("Видео отправлено на публикацию")
                     await page.wait_for_timeout(5000)
-                    await page.screenshot(path="tiktok_published.png")
+                    await self.take_screenshot(page, "tiktok_published.png")
                     
                     # Проверяем успешность публикации
                     success = await self.check_publication_success(page)
@@ -137,11 +222,11 @@ class TikTokManager:
                         return False
                 else:
                     print("Не удалось найти кнопку публикации")
-                    await page.screenshot(path="tiktok_no_publish_button.png")
+                    await self.take_screenshot(page, "tiktok_no_publish_button.png")
                     return False
         except Exception as e:
             print(f"Ошибка при публикации видео: {str(e)}")
-            await page.screenshot(path="tiktok_publish_error.png")
+            await self.take_screenshot(page, "tiktok_publish_error.png")
             return False
     
     async def handle_additional_forms(self, page):
@@ -228,17 +313,22 @@ class TikTokManager:
         """Обрабатывает один файл с куками"""
         print(f"Обработка файла с куками: {cookie_file}")
         
+        # Создаем директорию для скриншотов текущей сессии
+        self.prepare_screenshot_directory(cookie_file)
+        
         # Загружаем куки из файла
         cookies = self.cookies_loader.load_cookies(cookie_file)
         if not cookies:
             print(f"Не удалось загрузить куки из файла {cookie_file}")
             self.cookies_loader.mark_cookie_as_invalid(cookie_file)
+            self.mark_screenshot_directory(cookie_file, False)
             return False
         
         # Получаем путь к первому видео
         video_path = self.get_first_video()
         if not video_path:
             print("Не удалось найти видео для загрузки. Убедитесь, что в папке videos есть видео файлы.")
+            self.mark_screenshot_directory(cookie_file, False)
             return False
         
         # Обновляем IP прокси перед работой с аккаунтом
@@ -252,15 +342,32 @@ class TikTokManager:
                 
                 context = await browser.new_context(
                     proxy=self.proxy,
-                    locale='ru-RU',
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'
+                    locale=config.DEFAULT_LOCALE,  # Используем локаль из файла конфигурации
+                    user_agent=config.DEFAULT_USER_AGENT  # Используем user agent из файла конфигурации
                 )
                 
                 # Установить cookies
                 await context.add_cookies(cookies)
                 page = await context.new_page()
-                await page.goto("https://tiktok.com", wait_until='load')
-                await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
+                
+                try:
+                    await page.goto("https://tiktok.com", wait_until='load')
+                    await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
+                except Exception as nav_error:
+                    error_text = str(nav_error).lower()
+                    
+                    # Проверяем, связана ли ошибка с SSL или прокси
+                    if any(err in error_text for err in ['ssl_error', 'ssl error', 'proxy', 'connection', 'timeout', 'connect']):
+                        print(f"Ошибка соединения (SSL/прокси): {nav_error}")
+                        print("Пропускаем обработку - эта ошибка не связана с валидностью куки")
+                        self.mark_screenshot_directory(cookie_file, None)  # Не помечаем ни валидным, ни невалидным
+                        return False
+                    else:
+                        # Другие ошибки навигации могут быть связаны с куки
+                        raise  # Перебросим ошибку для обработки в блоке catch ниже
+                
+                # Делаем скриншот главной страницы
+                await self.take_screenshot(page, "tiktok_main_page.png")
                 
                 # Обрабатываем диалог согласия на cookie на главной странице
                 await self.handle_cookie_consent(page)
@@ -270,14 +377,27 @@ class TikTokManager:
                 
                 if is_authenticated:
                     # Переходим на страницу загрузки
-                    await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='load')
-                    await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
+                    try:
+                        await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='load')
+                        await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
+                    except Exception as upload_nav_error:
+                        error_text = str(upload_nav_error).lower()
+                        
+                        # Проверяем, связана ли ошибка с SSL или прокси
+                        if any(err in error_text for err in ['ssl_error', 'ssl error', 'proxy', 'connection', 'timeout', 'connect']):
+                            print(f"Ошибка соединения при переходе на страницу загрузки: {upload_nav_error}")
+                            print("Пропускаем обработку - эта ошибка не связана с валидностью куки")
+                            self.mark_screenshot_directory(cookie_file, None)  # Не помечаем ни валидным, ни невалидным
+                            return False
+                        else:
+                            # Другие ошибки навигации могут быть связаны с куки
+                            raise  # Перебросим ошибку для обработки в блоке catch ниже
                     
                     # Обрабатываем диалог согласия на cookie на странице загрузки
                     await self.handle_cookie_consent(page)
                     
                     # Делаем скриншот страницы загрузки
-                    await page.screenshot(path="tiktok_upload_page.png")
+                    await self.take_screenshot(page, "tiktok_upload_page.png")
                     
                     # Загружаем видео
                     upload_success = await self.upload_video(page, video_path)
@@ -285,29 +405,44 @@ class TikTokManager:
                     if upload_success:
                         print("Загрузка и публикация видео выполнены")
                         self.cookies_loader.mark_cookie_as_valid(cookie_file)
+                        self.mark_screenshot_directory(cookie_file, True)
                         # Ждем некоторое время перед закрытием браузера
-                        await page.wait_for_timeout(10000)  # 10 секунд
+                        await page.wait_for_timeout(3000)  # 3 секунд
                         return True
                     else:
                         print("Не удалось загрузить или опубликовать видео")
                         self.cookies_loader.mark_cookie_as_invalid(cookie_file)
+                        self.mark_screenshot_directory(cookie_file, False)
                         return False
                 else:
                     print("Не удалось авторизоваться с данными куками")
                     self.cookies_loader.mark_cookie_as_invalid(cookie_file)
+                    self.mark_screenshot_directory(cookie_file, False)
                     return False
         
         except Exception as e:
-            print(f"Ошибка при обработке куков {cookie_file}: {str(e)}")
-            traceback.print_exc()
-            self.cookies_loader.mark_cookie_as_invalid(cookie_file)
-            return False
+            error_text = str(e).lower()
+            
+            # Проверяем, связана ли ошибка с SSL или прокси
+            if any(err in error_text for err in ['ssl_error', 'ssl error', 'proxy', 'connection', 'timeout', 'connect']):
+                print(f"Ошибка соединения: {e}")
+                traceback.print_exc()
+                print("Пропускаем обработку - эта ошибка не связана с валидностью куки")
+                self.mark_screenshot_directory(cookie_file, None)
+                return False
+            else:
+                # Для других ошибок помечаем куки как невалидный
+                print(f"Ошибка при обработке куков {cookie_file}: {str(e)}")
+                traceback.print_exc()
+                self.cookies_loader.mark_cookie_as_invalid(cookie_file)
+                self.mark_screenshot_directory(cookie_file, False)
+                return False
     
     async def check_authentication(self, page):
         """Проверяет, авторизован ли пользователь на странице TikTok"""
         try:
             # Делаем скриншот для проверки
-            await page.screenshot(path="tiktok_auth_check.png")
+            await self.take_screenshot(page, "tiktok_auth_check.png")
             
             # Проверяем наличие элементов, которые обычно видны только авторизованным пользователям
             # Например, иконка профиля или другие элементы интерфейса
@@ -349,6 +484,9 @@ class TikTokManager:
         try:
             print("Проверяем наличие диалога согласия на cookie...")
             
+            # Перед поиском делаем скриншот текущего состояния
+            await self.take_screenshot(page, "before_cookie_consent.png")
+            
             # Пытаемся найти диалоговое окно с кнопками согласия на cookie
             # Способ 1: Ищем по классу обертки кнопок
             cookie_dialog = await page.query_selector('div.button-wrapper.special-button-wrapper')
@@ -373,6 +511,7 @@ class TikTokManager:
                     
                     # Даем время на обработку нажатия
                     await page.wait_for_timeout(2000)
+                    await self.take_screenshot(page, "after_cookie_consent.png")
                     return True
             
             # Способ 2: Ищем кнопки по содержимому текста, связанного с cookie
@@ -388,6 +527,7 @@ class TikTokManager:
                 print("Кнопка согласия на cookie нажата")
                 
                 await page.wait_for_timeout(2000)
+                await self.take_screenshot(page, "after_cookie_consent.png")
                 return True
                 
             # Способ 3: Ищем элементы с data-атрибутами, которые часто используются в диалогах cookie
@@ -409,6 +549,7 @@ class TikTokManager:
                         print("Кнопка в окне согласия на cookie нажата")
                         
                         await page.wait_for_timeout(2000)
+                        await self.take_screenshot(page, "after_cookie_consent.png")
                         return True
             
             # Способ 4: Проверка конкретно для TikTok (если у них есть специфичный формат)
@@ -423,12 +564,14 @@ class TikTokManager:
                 print("Кнопка согласия на cookie TikTok нажата")
                 
                 await page.wait_for_timeout(2000)
+                await self.take_screenshot(page, "after_cookie_consent.png")
                 return True
             
             print("Окно согласия на cookie не найдено или уже обработано")
+            await self.take_screenshot(page, "after_cookie_consent.png")
             return False
             
         except Exception as e:
             print(f"Ошибка при обработке диалога согласия на cookie: {str(e)}")
-            await page.screenshot(path="cookie_consent_error.png")
+            await self.take_screenshot(page, "cookie_consent_error.png")
             return False 

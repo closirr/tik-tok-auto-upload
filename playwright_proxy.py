@@ -59,7 +59,7 @@ async def upload_video(page, video_path):
             await page.screenshot(path="tiktok_file_selected.png")
             
             # Ждем достаточное время для завершения загрузки и обработки
-            await page.wait_for_timeout(30000)  # 30 секунд
+            await page.wait_for_timeout(6000)  # 30 секунд
             return True
             
         else:
