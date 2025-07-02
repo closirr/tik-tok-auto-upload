@@ -1,11 +1,18 @@
+import os
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения из файла .env
+load_dotenv()
+
+# Настройки прокси из .env
 PROXY = {
-    'server': 'http://109.236.82.42:9999',
-    'username': 'wxwvdvgfow-corp.res-country-GB-hold-session-session-68517cb48cdb3',
-    'password': '8Y2oj7h82CGGzcSW'
+    'server': os.getenv('PROXY_SERVER'),
+    'username': os.getenv('PROXY_USERNAME'),
+    'password': os.getenv('PROXY_PASSWORD')
 }
 
-# URL для обновления IP прокси
-PROXY_REFRESH_URL = "https://api.asocks.com/user/port/refresh/ip/0689bae6-4b88-11f0-90b5-bc24114c89e8"
+# URL для обновления IP прокси из .env
+PROXY_REFRESH_URL = os.getenv('PROXY_REFRESH_URL')
 
 # Другие конфигурации
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'
