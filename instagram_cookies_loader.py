@@ -5,8 +5,8 @@ import os
 import glob
 import shutil
 
-class CookiesLoader:
-    def __init__(self, cookies_dir='cookies'):
+class InstagramCookiesLoader:
+    def __init__(self, cookies_dir='instagram_cookies'):
         self.cookies_dir = cookies_dir
         
         # Создаем директорию, если она не существует
@@ -42,7 +42,6 @@ class CookiesLoader:
                             continue
                         
                         try:
-                            # Формат: domain flag path secure expiration name value
                             parts = line.split('\t')
                             if len(parts) >= 7:
                                 domain, httpOnly, path, secure, expiry, name, value = parts[:7]
@@ -56,47 +55,45 @@ class CookiesLoader:
                                     'value': value
                                 }
                                 
-                                # Playwright требует expires: -1 (сессионный) или положительное число
-                                if expiry and expiry.isdigit() and int(expiry) > 0:
-                                    cookie['expires'] = int(expiry)
-                                else:
-                                    cookie['expires'] = -1  # Сессионный кук
+                                # Обработка expires - только -1 или положительное число
+                                try:
+                                    exp_val = int(expiry) if expiry and expiry.strip() else 0
+                                    if exp_val > 0:
+                                        cookie['expires'] = exp_val
+                                    else:
+                                        cookie['expires'] = -1
+                                except:
+                                    cookie['expires'] = -1
                                 
                                 cookies.append(cookie)
                         except Exception as e:
                             print(f"Ошибка при парсинге строки куки Netscape: {line}")
-                            print(f"Ошибка: {str(e)}")
                     
                     if cookies:
                         print(f"Успешно загружены куки в формате Netscape: {len(cookies)} шт.")
                         return cookies
                 
-                # Стандартный формат (domain TAB path TAB secure TAB expiry TAB name TAB value)
-                # Или другие форматы с разделителями табуляцией
+                # Стандартный формат с табуляцией
                 lines = cookies_data.split('\n')
                 
-                # Регулярное выражение для парсинга строк куков, несколько вариантов
                 cookie_patterns = [
-                    r'([^\t]+)\t(FALSE|TRUE)\t([^\t]+)\t(FALSE|TRUE)\t(\d*)\t([^\t]+)\t(.*)', # Стандартный формат
-                    r'([^\t]+)\t(FALSE|TRUE)\t([^\t]*)\t(FALSE|TRUE)\t(\d*)\t([^\t]+)\t(.*)', # Вариант с пустым path
-                    r'\.([^\t]+)\t(FALSE|TRUE)\t([^\t]+)\t(FALSE|TRUE)\t(\d*)\t([^\t]+)\t(.*)', # Вариант с точкой перед доменом
+                    r'([^\t]+)\t(FALSE|TRUE)\t([^\t]+)\t(FALSE|TRUE)\t(\d*)\t([^\t]+)\t(.*)',
+                    r'([^\t]+)\t(FALSE|TRUE)\t([^\t]*)\t(FALSE|TRUE)\t(\d*)\t([^\t]+)\t(.*)',
+                    r'\.([^\t]+)\t(FALSE|TRUE)\t([^\t]+)\t(FALSE|TRUE)\t(\d*)\t([^\t]+)\t(.*)',
                 ]
                 
                 for line in lines:
                     line = line.strip()
-                    # Пропускаем комментарии и пустые строки
                     if not line or line.startswith('#') or line.startswith('–') or line.startswith('*') or line.startswith('='):
                         continue
                     
-                    # Пробуем разные шаблоны регулярных выражений
                     match_found = False
                     for pattern in cookie_patterns:
                         match = re.match(pattern, line)
                         if match:
                             domain, httpOnly, path, secure, expiry, name, value = match.groups()
                             
-                            # Исправляем домен - добавляем точку в начале, если её нет
-                            if not domain.startswith('.') and 'tiktok' in domain:
+                            if not domain.startswith('.') and 'instagram' in domain:
                                 domain = '.' + domain
                                 
                             cookie = {
@@ -108,49 +105,19 @@ class CookiesLoader:
                                 'value': value
                             }
                             
-                            # Playwright требует expires: -1 (сессионный) или положительное число
-                            if expiry and expiry.isdigit() and int(expiry) > 0:
-                                cookie['expires'] = int(expiry)
-                            else:
-                                cookie['expires'] = -1  # Сессионный кук
+                            # Обработка expires - только -1 или положительное число
+                            try:
+                                exp_val = int(expiry) if expiry and expiry.strip() else 0
+                                if exp_val > 0:
+                                    cookie['expires'] = exp_val
+                                else:
+                                    cookie['expires'] = -1
+                            except:
+                                cookie['expires'] = -1
                             
                             cookies.append(cookie)
                             match_found = True
                             break
-                    
-                    # Если не удалось распарсить по стандартным паттернам, ищем домен и значение вручную
-                    if not match_found:
-                        # Проверяем, есть ли в строке формат ключ:значение
-                        if ':' in line and not ('@' in line and len(line) < 40):  # Исключаем строки с email
-                            parts = line.split(':', 1)
-                            name = parts[0].strip()
-                            value = parts[1].strip()
-                            
-                        # Проверяем, есть ли это строка с доменом в начале и вкладкой после него
-                        elif "\t" in line and line.count("\t") >= 1:
-                            parts = line.split('\t')
-                            if len(parts) >= 2:
-                                # Возможно, это домен и значение
-                                domain = parts[0].strip()
-                                
-                                # Ищем имя и значение кука в оставшейся части
-                                if "=" in parts[-1]:
-                                    name_value = parts[-1].strip().split("=", 1)
-                                    if len(name_value) == 2:
-                                        name = name_value[0].strip()
-                                        value = name_value[1].strip()
-                                        
-                                        cookie = {
-                                            'domain': domain if domain.startswith('.') else '.' + domain,
-                                            'path': '/',
-                                            'secure': False,
-                                            'httpOnly': False,
-                                            'name': name,
-                                            'value': value,
-                                            'expires': -1  # Сессионный кук
-                                        }
-                                        cookies.append(cookie)
-                                        print(f"Извлечен кук из упрощенной строки: {domain} {name}")
                 
                 if cookies:
                     print(f"Успешно загружены куки в текстовом формате: {len(cookies)} шт.")
@@ -164,9 +131,8 @@ class CookiesLoader:
             return None
 
     def get_cookie_files(self):
-        """Получает список файлов с куками, которые еще не были обработаны (не имеют префиксов valid_ или invalid_)"""
+        """Получает список файлов с куками, которые еще не были обработаны"""
         all_files = glob.glob(os.path.join(self.cookies_dir, '*.*'))
-        # Фильтруем файлы, которые еще не были обработаны
         return [f for f in all_files if not os.path.basename(f).startswith(('valid_', 'invalid_'))]
 
     def mark_cookie_as_valid(self, cookie_file):

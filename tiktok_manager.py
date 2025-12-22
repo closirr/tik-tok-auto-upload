@@ -146,6 +146,9 @@ class TikTokManager:
             # Проверяем и обрабатываем окно согласия на cookie, если оно появилось
             await self.handle_cookie_consent(page)
             
+            # Обрабатываем информационные модальные окна с кнопкой "Понятно"
+            await self.handle_info_modals(page)
+            
             # Найдем input для загрузки файла
             file_input = await page.query_selector('input[type="file"]')
             
@@ -284,6 +287,9 @@ class TikTokManager:
             
             # Ждем некоторое время для появления форм
             await page.wait_for_timeout(3000)
+            
+            # Обрабатываем информационные модальные окна с кнопкой "Понятно"
+            await self.handle_info_modals(page)
             
             # Проверяем наличие полей для заполнения описания
             description_field = await page.query_selector('textarea[placeholder*="описание"], textarea[placeholder*="description"], [data-e2e="upload-desc"]')
@@ -771,6 +777,9 @@ class TikTokManager:
                     # Обрабатываем диалог согласия на cookie на странице загрузки
                     await self.handle_cookie_consent(page)
                     
+                    # Обрабатываем информационные модальные окна с кнопкой "Понятно"
+                    await self.handle_info_modals(page)
+                    
                     # Делаем скриншот страницы загрузки
                     await self.take_screenshot(page, "tiktok_upload_page.png")
                     
@@ -876,59 +885,143 @@ class TikTokManager:
         try:
             print("Проверка авторизации...")
             
-            # Проверяем IP перед проверкой авторизации - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-            # await self.check_whoer_ip(page, "перед_проверкой_авторизации")
-
-            
             # Переходим на главную страницу TikTok
-            await page.goto("https://www.tiktok.com", wait_until='load', timeout=30000)
-            await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
+            await page.goto("https://www.tiktok.com", wait_until='domcontentloaded', timeout=60000)
+            
+            # Ждем загрузки основного контента (увеличено время)
+            print("Ожидание загрузки страницы...")
+            await page.wait_for_timeout(8000)
             
             # Делаем скриншот главной страницы
             await self.take_screenshot(page, "tiktok_main_page.png")
             
-            # Проверяем IP после загрузки главной страницы - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-            # await self.check_whoer_ip(page, "после_загрузки_главной")
-
-            
             # Обрабатываем диалог согласия на cookie, если он появился
             await self.handle_cookie_consent(page)
             
-            # Проверяем наличие элементов, которые указывают на авторизацию
-            avatar = await page.query_selector('[data-e2e="user-avatar"], [data-e2e="profile-icon"], .avatar-wrapper, .user-avatar')
-            upload_icon = await page.query_selector('[data-e2e="upload-icon"], [aria-label="Upload"], .upload-icon')
+            # Обрабатываем информационные модальные окна с кнопкой "Понятно"
+            await self.handle_info_modals(page)
             
-            # Проверяем наличие элементов входа, которые указывают на отсутствие авторизации
-            login_button = await page.query_selector('[data-e2e="top-login-button"], button:has-text("Войти"), button:has-text("Login"), button:has-text("Sign in")')
+            # Дополнительное ожидание после обработки cookie consent
+            await page.wait_for_timeout(3000)
             
-            is_authenticated = (avatar is not None or upload_icon is not None) and login_button is None
+            # Расширенный список селекторов для проверки авторизации
+            # Селекторы аватара/профиля (признак авторизации)
+            avatar_selectors = [
+                '[data-e2e="user-avatar"]',
+                '[data-e2e="profile-icon"]', 
+                '[data-e2e="nav-profile"]',
+                '.avatar-wrapper',
+                '.user-avatar',
+                'div[class*="DivAvatarContainer"]',
+                'div[class*="AvatarContainer"]',
+                'img[class*="ImgAvatar"]',
+                'a[href*="/profile"]',
+                '[data-e2e="nav-foryou"] ~ *[data-e2e*="profile"]',
+            ]
+            
+            # Селекторы кнопки загрузки (признак авторизации)
+            upload_selectors = [
+                '[data-e2e="upload-icon"]',
+                '[aria-label="Upload"]',
+                '[aria-label="Загрузить"]',
+                '.upload-icon',
+                'a[href*="/upload"]',
+                'div[class*="DivUploadButton"]',
+            ]
+            
+            # Селекторы кнопки входа (признак отсутствия авторизации)
+            login_selectors = [
+                '[data-e2e="top-login-button"]',
+                'button:has-text("Войти")',
+                'button:has-text("Login")',
+                'button:has-text("Log in")',
+                'button:has-text("Sign in")',
+                'div[class*="DivLoginButton"]',
+                '[data-e2e="login-button"]',
+            ]
+            
+            # Проверяем наличие элементов авторизации
+            avatar = None
+            for selector in avatar_selectors:
+                try:
+                    avatar = await page.query_selector(selector)
+                    if avatar:
+                        print(f"Найден элемент аватара: {selector}")
+                        break
+                except:
+                    continue
+            
+            upload_icon = None
+            for selector in upload_selectors:
+                try:
+                    upload_icon = await page.query_selector(selector)
+                    if upload_icon:
+                        print(f"Найден элемент загрузки: {selector}")
+                        break
+                except:
+                    continue
+            
+            # Проверяем наличие кнопки входа
+            login_button = None
+            for selector in login_selectors:
+                try:
+                    login_button = await page.query_selector(selector)
+                    if login_button:
+                        print(f"Найдена кнопка входа: {selector}")
+                        break
+                except:
+                    continue
+            
+            # Дополнительная проверка через URL или содержимое страницы
+            current_url = page.url
+            page_content = await page.content()
+            
+            # Проверяем признаки авторизации в HTML
+            auth_indicators = [
+                '"isLogin":true',
+                '"loginStatus":1',
+                'uniqueId',
+                '"nickname"',
+            ]
+            
+            has_auth_indicator = any(indicator in page_content for indicator in auth_indicators)
+            if has_auth_indicator:
+                print("Обнаружены признаки авторизации в HTML")
+            
+            # Определяем статус авторизации
+            is_authenticated = (avatar is not None or upload_icon is not None or has_auth_indicator) and login_button is None
+            
+            # Если не нашли явных признаков, пробуем перейти на страницу профиля
+            if not is_authenticated and login_button is None:
+                print("Проверяем авторизацию через переход на страницу загрузки...")
+                try:
+                    await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='domcontentloaded', timeout=30000)
+                    await page.wait_for_timeout(5000)
+                    await self.take_screenshot(page, "tiktok_studio_check.png")
+                    
+                    studio_url = page.url
+                    # Если нас не перенаправило на страницу входа - мы авторизованы
+                    if 'login' not in studio_url.lower() and 'studio' in studio_url.lower():
+                        print("Успешный доступ к TikTok Studio - пользователь авторизован")
+                        is_authenticated = True
+                except Exception as e:
+                    print(f"Ошибка при проверке через Studio: {str(e)}")
             
             if is_authenticated:
                 print("Пользователь авторизован на TikTok")
                 
-                # Проверяем IP после успешной авторизации - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-                # await self.check_whoer_ip(page, "после_успешной_авторизации")
-
-                
                 # Переходим на страницу TikTok Studio для дальнейшей работы
-                await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='load', timeout=30000)
-                await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
+                if 'studio' not in page.url.lower():
+                    await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='domcontentloaded', timeout=60000)
+                    await page.wait_for_timeout(5000)
                 
                 # Делаем скриншот страницы загрузки
                 await self.take_screenshot(page, "tiktok_studio_page.png")
-                
-                # Проверяем IP после перехода на страницу загрузки - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-                # await self.check_whoer_ip(page, "после_перехода_на_страницу_загрузки")
-
                 
                 return True
             else:
                 print("Пользователь не авторизован на TikTok")
                 await self.take_screenshot(page, "tiktok_not_authenticated.png")
-                
-                # Проверяем IP при неуспешной авторизации - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-                # await self.check_whoer_ip(page, "при_неуспешной_авторизации")
-
                 
                 return False
                 
@@ -1032,6 +1125,80 @@ class TikTokManager:
         except Exception as e:
             print(f"Ошибка при обработке диалога согласия на cookie: {str(e)}")
             await self.take_screenshot(page, "cookie_consent_error.png")
+            return False
+    
+    async def handle_info_modals(self, page):
+        """Обрабатывает информационные модальные окна с кнопкой 'Понятно'"""
+        try:
+            print("Проверяем наличие информационных модальных окон...")
+            
+            modals_closed = 0
+            max_attempts = 5  # Максимум попыток закрыть модальные окна
+            
+            for attempt in range(max_attempts):
+                # Ищем кнопку "Понятно" в модальных окнах
+                # Способ 1: По тексту кнопки
+                ponyatno_button = await page.query_selector('button:has-text("Понятно"), div.Button__content:has-text("Понятно")')
+                
+                if ponyatno_button:
+                    print(f"Найдена кнопка 'Понятно' (попытка {attempt + 1})")
+                    await ponyatno_button.click()
+                    modals_closed += 1
+                    await page.wait_for_timeout(1000)
+                    continue
+                
+                # Способ 2: Ищем по классам TikTok (Button__content с текстом "Понятно")
+                button_content = await page.query_selector('.Button__content')
+                if button_content:
+                    button_text = await button_content.inner_text()
+                    if "Понятно" in button_text:
+                        print(f"Найдена кнопка 'Понятно' по классу (попытка {attempt + 1})")
+                        # Кликаем на родительский элемент кнопки
+                        parent_button = await button_content.evaluate_handle('el => el.closest("button") || el.parentElement')
+                        if parent_button:
+                            await parent_button.click()
+                        else:
+                            await button_content.click()
+                        modals_closed += 1
+                        await page.wait_for_timeout(1000)
+                        continue
+                
+                # Способ 3: Ищем кнопки "Включить" или "Отмена" в диалоге автоматической проверки контента
+                enable_button = await page.query_selector('button:has-text("Включить")')
+                cancel_button = await page.query_selector('button:has-text("Отмена")')
+                
+                if enable_button or cancel_button:
+                    # Предпочитаем нажать "Отмена" чтобы не включать лишние функции
+                    button_to_click = cancel_button if cancel_button else enable_button
+                    button_text = await button_to_click.inner_text()
+                    print(f"Найдена кнопка '{button_text}' в диалоге (попытка {attempt + 1})")
+                    await button_to_click.click()
+                    modals_closed += 1
+                    await page.wait_for_timeout(1000)
+                    continue
+                
+                # Способ 4: Ищем кнопку закрытия модального окна (крестик)
+                close_button = await page.query_selector('[aria-label="Close"], [aria-label="Закрыть"], button.close, .modal-close, [data-e2e="modal-close"]')
+                if close_button:
+                    print(f"Найдена кнопка закрытия модального окна (попытка {attempt + 1})")
+                    await close_button.click()
+                    modals_closed += 1
+                    await page.wait_for_timeout(1000)
+                    continue
+                
+                # Если ничего не найдено, выходим из цикла
+                break
+            
+            if modals_closed > 0:
+                print(f"Закрыто информационных модальных окон: {modals_closed}")
+                await self.take_screenshot(page, "after_info_modals.png")
+            else:
+                print("Информационные модальные окна не найдены")
+            
+            return modals_closed > 0
+            
+        except Exception as e:
+            print(f"Ошибка при обработке информационных модальных окон: {str(e)}")
             return False
     
     async def check_whoer_ip(self, page, stage_name=""):

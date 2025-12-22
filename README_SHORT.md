@@ -1,3 +1,8 @@
+Запуск проги - python main.py
+куки бере з папки cookies
+прога для витягування куків з файлів
+extract_tiktok_cookies
+
 # TikTok Auto Upload (Краткая инструкция)
 
 Этот бот автоматически загружает видео на TikTok, используя аккаунты из `cookies/` и видео из `videos/`.
