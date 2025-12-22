@@ -5,14 +5,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Настройки прокси из .env
+# Playwright требует определенный формат для прокси
+# https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-option-proxy
 PROXY = {
-    'server': os.getenv('PROXY_SERVER'),
+    'server': f"http://{os.getenv('PROXY_SERVER')}:{os.getenv('PROXY_PORT')}",
     'username': os.getenv('PROXY_USERNAME'),
     'password': os.getenv('PROXY_PASSWORD')
 }
 
 # URL для обновления IP прокси из .env
 PROXY_REFRESH_URL = os.getenv('PROXY_REFRESH_URL')
+
+# Флаг использования ротации прокси
+# Если True - используется режим ротации (каждый запрос через новый IP)
+# Если False - используется обновление IP через API
+USE_PROXY_ROTATION_ENV = os.getenv('USE_PROXY_ROTATION', 'true').lower()
+USE_PROXY_ROTATION = USE_PROXY_ROTATION_ENV == 'true'
 
 # Другие конфигурации
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'

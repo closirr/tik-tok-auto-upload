@@ -4,6 +4,12 @@
 *.png
 *.json
 
+# Папки с куками
+cookies/
+cookies.old/
+cookies_example/
+cookies_extracted/
+
 # Стандартные игнорируемые файлы
 __pycache__/
 *.py[cod]

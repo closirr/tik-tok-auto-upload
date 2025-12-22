@@ -22,10 +22,16 @@ async def main():
     print(f"Найдено {len(cookie_files)} файлов с куками для обработки")
     
     # Обрабатываем каждый файл с куками
-    for cookie_file in cookie_files:
+    for i, cookie_file in enumerate(cookie_files):
         print(f"Обработка {cookie_file}...")
         await manager.process_account(cookie_file)
         print(f"Обработка {cookie_file} завершена")
+        
+        # Добавляем задержку между обработкой аккаунтов, кроме последнего
+        if i < len(cookie_files) - 1:
+            delay = 3  # 30 секунд между аккаунтами
+            print(f"Ожидание {delay} секунд перед обработкой следующего аккаунта...")
+            await asyncio.sleep(delay)
     
     print("=" * 50)
     print("Обработка всех файлов с куками завершена")
