@@ -14,7 +14,24 @@ class FacebookManager:
         self.screenshots_dir = screenshots_dir
         self.cookies_loader = FacebookCookiesLoader(cookies_dir)
         self.current_screenshot_dir = None
-        self.proxy = config.PROXY
+        
+        # Настройка прокси в зависимости от режима
+        self.proxy_disabled = config.PROXY_DISABLED
+        self.use_free_proxy = config.USE_FREE_PROXY
+        
+        if self.proxy_disabled:
+            print("🚫 Прокси отключен")
+            self.proxy = None
+            self.proxy_manager = None
+        elif self.use_free_proxy:
+            print("🆓 Используются бесплатные прокси")
+            self.proxy = None  # Будет устанавливаться динамически
+            self.proxy_manager = None
+        else:
+            print("💰 Используются платные прокси")
+            self.proxy = config.PROXY
+            self.proxy_manager = None
+            
         self.proxy_refresh_url = config.PROXY_REFRESH_URL
         self.use_proxy_rotation = config.USE_PROXY_ROTATION
         
@@ -75,6 +92,15 @@ class FacebookManager:
 
     async def refresh_proxy_ip(self):
         """Обновляет IP-адрес прокси"""
+        if self.proxy_disabled:
+            print("🚫 Прокси отключен - обновление IP не требуется")
+            return True
+            
+        if self.use_free_proxy:
+            print("🔄 Обновление бесплатного прокси...")
+            # Здесь можно добавить логику для бесплатных прокси
+            return True
+            
         try:
             print("Обновление IP-адреса прокси...")
             async with aiohttp.ClientSession() as session:
@@ -132,6 +158,10 @@ class FacebookManager:
     
     async def check_proxy_connection(self):
         """Проверяет работу прокси через ipinfo.io API"""
+        if self.proxy_disabled:
+            print("🚫 Прокси отключен - проверка соединения не требуется")
+            return True, {"ip": "local", "country": "Local", "city": "Local"}
+            
         try:
             print("Проверка работы прокси через ipinfo.io...")
             
@@ -406,14 +436,25 @@ class FacebookManager:
             self.mark_screenshot_directory(cookie_file, False)
             return 'invalid'
         
-        print(f"Настройки прокси: {self.proxy['server']}")
+        # Выводим текущие настройки прокси для отладки
+        if self.proxy_disabled:
+            print("🚫 Работа без прокси (прокси отключен)")
+        elif self.proxy:
+            print("Текущие настройки прокси:")
+            print(f"- Тип: {'Бесплатный' if self.use_free_proxy else 'Платный'}")
+            print(f"- Сервер: {self.proxy['server']}")
+        else:
+            print("⚠️  Прокси не настроен")
+            return 'invalid'
+        
+        print(f"Настройки прокси: {self.proxy['server'] if self.proxy else 'отключен'}")
         
         try:
             async with async_playwright() as p:
                 browser = await p.firefox.launch(headless=False)
                 
                 context = await browser.new_context(
-                    proxy=self.proxy,
+                    proxy=self.proxy if not self.proxy_disabled else None,
                     locale=config.DEFAULT_LOCALE,
                     user_agent=config.DEFAULT_USER_AGENT
                 )

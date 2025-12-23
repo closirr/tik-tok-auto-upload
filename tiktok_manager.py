@@ -10,6 +10,7 @@ import aiohttp
 from tiktok_cookies_loader import CookiesLoader
 import datetime
 import config  # Импортируем файл конфигурации
+from free_proxy_integration import get_proxy_manager, get_primary_proxy, refresh_proxy
 
 # Файл для сохранения результатов загрузки
 UPLOAD_RESULTS_FILE = "upload_results.json"
@@ -21,9 +22,26 @@ class TikTokManager:
         self.screenshots_dir = screenshots_dir
         self.cookies_loader = CookiesLoader(cookies_dir)
         self.current_screenshot_dir = None
-        self.proxy = config.PROXY  # Используем прокси из файла конфигурации
-        self.proxy_refresh_url = config.PROXY_REFRESH_URL  # Используем URL для обновления IP из файла конфигурации
-        self.use_proxy_rotation = config.USE_PROXY_ROTATION  # Флаг использования ротации прокси
+        
+        # Настройка прокси в зависимости от режима
+        self.proxy_disabled = config.PROXY_DISABLED
+        self.use_free_proxy = config.USE_FREE_PROXY
+        
+        if self.proxy_disabled:
+            print("🚫 Прокси отключен")
+            self.proxy = None
+            self.proxy_manager = None
+        elif self.use_free_proxy:
+            print("🆓 Используются бесплатные прокси")
+            self.proxy = None  # Будет устанавливаться динамически
+            self.proxy_manager = get_proxy_manager()
+        else:
+            print("💰 Используются платные прокси")
+            self.proxy = config.PROXY
+            self.proxy_manager = None
+            
+        self.proxy_refresh_url = config.PROXY_REFRESH_URL
+        self.use_proxy_rotation = config.USE_PROXY_ROTATION
         
         # Создаем директории, если они не существуют
         for directory in [videos_dir, cookies_dir, screenshots_dir]:
@@ -67,7 +85,8 @@ class TikTokManager:
     
     async def get_tiktok_username(self, page):
         """
-        Получает никнейм пользователя TikTok со страницы
+        Получает никнейм пользователя TikTok со страницы.
+        Оптимизировано - только парсинг HTML без дополнительных переходов.
         
         Args:
             page: Объект страницы Playwright
@@ -78,7 +97,6 @@ class TikTokManager:
         try:
             print("Получение никнейма пользователя...")
             
-            # Способ 1: Ищем в HTML странице
             page_content = await page.content()
             
             # Ищем uniqueId в JSON данных страницы
@@ -88,27 +106,12 @@ class TikTokManager:
                 print(f"Найден никнейм (uniqueId): {username}")
                 return username
             
-            # Способ 2: Ищем nickname
+            # Ищем nickname
             nickname_match = re.search(r'"nickname"\s*:\s*"([^"]+)"', page_content)
             if nickname_match:
                 username = nickname_match.group(1)
                 print(f"Найден никнейм (nickname): {username}")
                 return username
-            
-            # Способ 3: Переходим на страницу профиля и получаем из URL
-            try:
-                await page.goto("https://www.tiktok.com/tiktokstudio/creator-center", wait_until='domcontentloaded', timeout=15000)
-                await page.wait_for_timeout(3000)
-                
-                # Ищем элемент с никнеймом на странице Creator Center
-                username_element = await page.query_selector('[data-e2e="creator-center-username"], .username, [class*="UserName"]')
-                if username_element:
-                    username = await username_element.inner_text()
-                    if username:
-                        print(f"Найден никнейм на странице: {username}")
-                        return username.strip().replace('@', '')
-            except Exception as e:
-                print(f"Не удалось получить никнейм со страницы Creator Center: {str(e)}")
             
             print("Не удалось получить никнейм пользователя")
             return None
@@ -117,9 +120,29 @@ class TikTokManager:
             print(f"Ошибка при получении никнейма: {str(e)}")
             return None
     
+    def extract_username_from_video_url(self, video_url):
+        """
+        Извлекает username из URL видео.
+        
+        Args:
+            video_url: URL вида https://www.tiktok.com/@username/video/123
+            
+        Returns:
+            str: username или None
+        """
+        if not video_url:
+            return None
+        try:
+            match = re.search(r'tiktok\.com/@([^/]+)/video/', video_url)
+            if match:
+                return match.group(1)
+            return None
+        except:
+            return None
+    
     async def get_published_video_url(self, page):
         """
-        Получает ссылку на опубликованное видео
+        Получает ссылку на опубликованное видео со страницы контента.
         
         Args:
             page: Объект страницы Playwright
@@ -130,38 +153,30 @@ class TikTokManager:
         try:
             print("Получение ссылки на опубликованное видео...")
             
-            # Ждем перенаправления на страницу контента
-            await page.wait_for_timeout(3000)
+            # Ждём возможного редиректа после публикации
+            await page.wait_for_timeout(2000)
             
             current_url = page.url
             
-            # Если мы на странице контента, ищем последнее видео
-            if '/tiktokstudio/content' in current_url or '/creator' in current_url:
-                # Ищем первое видео в списке (последнее загруженное)
-                video_link = await page.query_selector('a[href*="/video/"], [data-e2e="content-card"] a, .video-card a')
+            # Если мы уже на странице контента - ищем там
+            if '/tiktokstudio/content' in current_url:
+                await page.wait_for_timeout(3000)
+                video_link = await page.query_selector('a[href*="/video/"]')
                 if video_link:
                     href = await video_link.get_attribute('href')
                     if href:
-                        # Формируем полный URL если нужно
                         if href.startswith('/'):
                             href = f"https://www.tiktok.com{href}"
                         print(f"Найдена ссылка на видео: {href}")
                         return href
             
-            # Способ 2: Ищем в HTML странице
-            page_content = await page.content()
-            video_url_match = re.search(r'https://www\.tiktok\.com/@[^/]+/video/\d+', page_content)
-            if video_url_match:
-                video_url = video_url_match.group(0)
-                print(f"Найдена ссылка на видео в HTML: {video_url}")
-                return video_url
-            
-            # Способ 3: Переходим на страницу контента и ищем там
+            # Переходим на страницу контента (там список наших видео)
             try:
+                print("Переход на страницу контента для получения ссылки на видео...")
                 await page.goto("https://www.tiktok.com/tiktokstudio/content", wait_until='domcontentloaded', timeout=15000)
                 await page.wait_for_timeout(5000)
                 
-                # Ищем первое видео в списке
+                # Ищем первое видео в списке (последнее загруженное)
                 video_link = await page.query_selector('a[href*="/video/"]')
                 if video_link:
                     href = await video_link.get_attribute('href')
@@ -183,6 +198,7 @@ class TikTokManager:
     def prepare_screenshot_directory(self, cookie_file):
         """
         Создает директорию для скриншотов текущей сессии работы с cookie-файлом
+        Организует папки по датам для удобного поиска
         
         Args:
             cookie_file: Имя cookie-файла, для которого создается директория
@@ -193,11 +209,13 @@ class TikTokManager:
         # Извлекаем имя файла без расширения
         cookie_name = os.path.basename(cookie_file).split('.')[0]
         
-        # Добавляем метку времени для уникальности
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Получаем текущую дату и время
+        now = datetime.datetime.now()
+        date_folder = now.strftime("%Y-%m-%d")  # Папка по дате: 2025-12-23
+        timestamp = now.strftime("%H%M%S")      # Время для уникальности: 143052
         
-        # Создаем директорию с именем cookie-файла
-        screenshot_dir = os.path.join(self.screenshots_dir, f"{cookie_name}_{timestamp}")
+        # Создаем структуру: screenshots/2025-12-23/cookie_name_143052/
+        screenshot_dir = os.path.join(self.screenshots_dir, date_folder, f"{cookie_name}_{timestamp}")
         os.makedirs(screenshot_dir, exist_ok=True)
         
         # Сохраняем путь для последующего использования
@@ -289,7 +307,9 @@ class TikTokManager:
             video_path: Путь к видеофайлу для загрузки
         
         Returns:
-            bool: True, если загрузка запущена успешно, False в случае ошибки
+            bool: True, если загрузка запущена успешно
+            str: "page_not_loaded" если страница не загрузилась (не помечать как invalid)
+            False: если ошибка загрузки
         """
         try:
             # Проверяем IP перед загрузкой видео - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
@@ -302,8 +322,23 @@ class TikTokManager:
             # Обрабатываем информационные модальные окна с кнопкой "Понятно"
             await self.handle_info_modals(page)
             
-            # Найдем input для загрузки файла
-            file_input = await page.query_selector('input[type="file"]')
+            # Ждём загрузки страницы с retry
+            file_input = None
+            max_wait_attempts = 5
+            
+            for attempt in range(max_wait_attempts):
+                file_input = await page.query_selector('input[type="file"]')
+                if file_input:
+                    break
+                    
+                print(f"⏳ Ожидание загрузки страницы... ({attempt + 1}/{max_wait_attempts})")
+                await page.wait_for_timeout(3000)  # Ждём 3 секунды
+                
+                # Проверяем наличие лоадера (страница ещё грузится)
+                loader = await page.query_selector('[class*="loading"], [class*="spinner"], [class*="loader"]')
+                if loader:
+                    print("   Страница ещё загружается...")
+                    await page.wait_for_timeout(5000)  # Дополнительное ожидание
             
             if file_input:
                 # Используем абсолютный путь к видео
@@ -325,31 +360,24 @@ class TikTokManager:
                 
                 # Ждем достаточное время для завершения загрузки и обработки
                 print("Ждем загрузку видео...")
-                await page.wait_for_timeout(3000)  # 3 секунды
-                
-                # Проверяем IP во время загрузки видео - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-                # await self.check_whoer_ip(page, "во_время_загрузки")
-
+                await page.wait_for_timeout(25000)  # 25 секунд для загрузки видео
                 
                 # Проверяем наличие дополнительных форм или шагов
                 await self.handle_additional_forms(page)
                 
-                # Проверяем IP перед публикацией - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-                # await self.check_whoer_ip(page, "перед_публикацией")
-
-                
                 # Публикуем видео
                 publication_result = await self.publish_video(page)
                 
-                # Проверяем IP после публикации - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-                # await self.check_whoer_ip(page, "после_публикации")
-
+                # Если публикация не удалась но видео было выбрано — аккаунт валидный, проблема с сетью
+                if publication_result == False:
+                    return "publish_failed"  # Не помечать как invalid
                 
-                return True
+                return publication_result
                 
             else:
-                print("Не удалось найти поле для загрузки файла")
-                return False
+                print("❌ Не удалось найти поле для загрузки файла (страница не загрузилась)")
+                await self.take_screenshot(page, "page_not_loaded.png")
+                return "page_not_loaded"  # Специальное значение - не помечать как invalid
         
         except Exception as e:
             print(f"Ошибка при загрузке видео: {str(e)}")
@@ -359,19 +387,37 @@ class TikTokManager:
     async def publish_video(self, page):
         """Публикует загруженное видео, нажимая на кнопку 'Опубликовать'"""
         try:
-            # Проверяем IP перед нажатием кнопки публикации - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-            # await self.check_whoer_ip(page, "перед_нажатием_кнопки_публикации")
-
+            # Закрываем модалки которые могут мешать (например "Добавлены новые функции редактирования")
+            await self.close_blocking_modals(page)
             
-            # Нажимаем на кнопку "Опубликовать"
+            # Ждём появления кнопки "Опубликовать" с retry
             print("Ищем кнопку 'Опубликовать'...")
-            publish_button = await page.query_selector('[data-e2e="post_video_button"]')
+            publish_button = None
+            
+            for attempt in range(10):  # 10 попыток по 2 секунды = 20 секунд макс
+                publish_button = await page.query_selector('[data-e2e="post_video_button"]')
+                if publish_button:
+                    break
+                
+                # Пробуем альтернативный селектор
+                publish_button = await page.query_selector('button:has-text("Опубликовать")')
+                if publish_button:
+                    break
+                    
+                print(f"⏳ Ожидание кнопки 'Опубликовать'... ({attempt + 1}/10)")
+                await self.close_blocking_modals(page)  # Закрываем модалки на каждой итерации
+                await page.wait_for_timeout(2000)
             
             if publish_button:
                 print("Нажимаем на кнопку 'Опубликовать'")
                 await publish_button.click()
                 print("Видео отправлено на публикацию")
-                await page.wait_for_timeout(5000)  # Ждем 5 секунд после публикации
+                await page.wait_for_timeout(3000)  # Ждем появления модалки
+                
+                # Проверяем модальное окно "Продолжить публикацию?"
+                await self.handle_continue_publish_modal(page)
+                
+                await page.wait_for_timeout(2000)  # Дополнительное ожидание
                 await self.take_screenshot(page, "tiktok_published.png")
                 
                 # Проверяем IP сразу после нажатия кнопки публикации - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
@@ -407,7 +453,12 @@ class TikTokManager:
                     
                     await button.click()
                     print("Видео отправлено на публикацию")
-                    await page.wait_for_timeout(5000)
+                    await page.wait_for_timeout(3000)
+                    
+                    # Проверяем модальное окно "Продолжить публикацию?"
+                    await self.handle_continue_publish_modal(page)
+                    
+                    await page.wait_for_timeout(2000)
                     await self.take_screenshot(page, "tiktok_published.png")
                     
                     # Проверяем IP после нажатия альтернативной кнопки - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
@@ -429,6 +480,87 @@ class TikTokManager:
         except Exception as e:
             print(f"Ошибка при публикации видео: {str(e)}")
             await self.take_screenshot(page, "tiktok_publish_error.png")
+            return False
+    
+    async def handle_continue_publish_modal(self, page):
+        """Обрабатывает модальное окно 'Продолжить публикацию?' которое появляется когда проверка авторских прав не завершена"""
+        try:
+            print("Проверяем наличие модального окна 'Продолжить публикацию?'...")
+            
+            # Ищем модальное окно по тексту заголовка
+            modal_selectors = [
+                'div:has-text("Продолжить публикацию?")',
+                '[class*="modal"]:has-text("Продолжить публикацию")',
+                '[role="dialog"]:has-text("Продолжить публикацию")',
+            ]
+            
+            modal_found = False
+            for selector in modal_selectors:
+                try:
+                    modal = await page.query_selector(selector)
+                    if modal:
+                        modal_found = True
+                        break
+                except:
+                    continue
+            
+            if modal_found:
+                print("Найдено модальное окно 'Продолжить публикацию?'")
+                await self.take_screenshot(page, "continue_publish_modal.png")
+                
+                # Ищем кнопку "Опубликовать" в модальном окне
+                # Кнопка красная/розовая с текстом "Опубликовать"
+                publish_button_selectors = [
+                    'button:has-text("Опубликовать"):not([data-e2e="post_video_button"])',
+                    '[role="dialog"] button:has-text("Опубликовать")',
+                    '[class*="modal"] button:has-text("Опубликовать")',
+                    'button[class*="primary"]:has-text("Опубликовать")',
+                    'button[class*="confirm"]:has-text("Опубликовать")',
+                ]
+                
+                for selector in publish_button_selectors:
+                    try:
+                        button = await page.query_selector(selector)
+                        if button:
+                            # Проверяем что кнопка видима
+                            is_visible = await button.is_visible()
+                            if is_visible:
+                                print(f"Найдена кнопка 'Опубликовать' в модальном окне, нажимаем...")
+                                await button.click(force=True)
+                                print("Кнопка 'Опубликовать' в модальном окне нажата")
+                                await page.wait_for_timeout(2000)
+                                return True
+                    except Exception as e:
+                        continue
+                
+                # Альтернативный поиск - все кнопки с текстом "Опубликовать"
+                try:
+                    buttons = await page.query_selector_all('button:has-text("Опубликовать")')
+                    for button in buttons:
+                        try:
+                            is_visible = await button.is_visible()
+                            if is_visible:
+                                # Проверяем что это не основная кнопка публикации
+                                data_e2e = await button.get_attribute('data-e2e')
+                                if data_e2e != 'post_video_button':
+                                    print("Найдена альтернативная кнопка 'Опубликовать', нажимаем...")
+                                    await button.click(force=True)
+                                    print("Альтернативная кнопка нажата")
+                                    await page.wait_for_timeout(2000)
+                                    return True
+                        except:
+                            continue
+                except:
+                    pass
+                
+                print("Не удалось найти кнопку 'Опубликовать' в модальном окне")
+                return False
+            else:
+                print("Модальное окно 'Продолжить публикацию?' не найдено")
+                return True  # Возвращаем True так как модалка не появилась - это нормально
+                
+        except Exception as e:
+            print(f"Ошибка при обработке модального окна 'Продолжить публикацию?': {str(e)}")
             return False
     
     async def handle_additional_forms(self, page):
@@ -466,32 +598,6 @@ class TikTokManager:
                 
                 # Проверяем IP после нажатия кнопки "Далее" - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
                 # await self.check_whoer_ip(page, "после_нажатия_далее")
-
-            
-            # Проверяем наличие ВИДИМЫХ чекбоксов и переключателей
-            checkboxes = await page.query_selector_all('input[type="checkbox"]')
-            checked_count = 0
-            for i, checkbox in enumerate(checkboxes):
-                try:
-                    # Проверяем видимость чекбокса перед работой с ним
-                    is_visible = await checkbox.is_visible()
-                    if not is_visible:
-                        continue  # Пропускаем невидимые чекбоксы
-                    
-                    is_checked = await checkbox.is_checked()
-                    if not is_checked:
-                        print(f"Отмечаем чекбокс {i+1}")
-                        await checkbox.check(timeout=5000)  # Уменьшаем таймаут
-                        checked_count += 1
-                        await page.wait_for_timeout(500)
-                except Exception as e:
-                    print(f"Пропускаем чекбокс {i+1}: не удалось обработать")
-            
-            if checked_count > 0:
-                print(f"Отмечено чекбоксов: {checked_count}")
-            
-            # Проверяем IP после обработки чекбоксов - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-            # await self.check_whoer_ip(page, "после_обработки_чекбоксов")
 
             
             # Делаем скриншот после обработки всех форм
@@ -537,30 +643,41 @@ class TikTokManager:
     async def refresh_proxy_ip(self):
         """Обновляет IP-адрес прокси перед работой с аккаунтом"""
         try:
-            print("Обновление IP-адреса прокси...")
-            async with aiohttp.ClientSession() as session:
-                async with session.get(self.proxy_refresh_url) as response:
-                    if response.status == 200:
-                        response_data = await response.json()
-                        if response_data.get("success"):
-                            session_id = response_data.get("session")
-                            login = response_data.get("login")
-                            print(f"IP прокси успешно обновлен. Сессия: {session_id}")
-                            
-                            # Обновляем логин прокси с новой сессией
-                            if session_id and login:
-                                self.proxy['username'] = login
-                                print(f"Обновлен логин прокси: {login}")
-                            
-                            return True
+            if self.use_free_proxy:
+                print("🔄 Обновление бесплатного прокси...")
+                new_proxy = await refresh_proxy()
+                if new_proxy:
+                    self.proxy = new_proxy
+                    print(f"✅ Бесплатный прокси обновлен: {new_proxy['server']}")
+                    return True
+                else:
+                    print("❌ Не удалось получить новый бесплатный прокси")
+                    return False
+            else:
+                print("🔄 Обновление платного прокси...")
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(self.proxy_refresh_url) as response:
+                        if response.status == 200:
+                            response_data = await response.json()
+                            if response_data.get("success"):
+                                session_id = response_data.get("session")
+                                login = response_data.get("login")
+                                print(f"✅ IP платного прокси успешно обновлен. Сессия: {session_id}")
+                                
+                                # Обновляем логин прокси с новой сессией
+                                if session_id and login:
+                                    self.proxy['username'] = login
+                                    print(f"Обновлен логин прокси: {login}")
+                                
+                                return True
+                            else:
+                                print("❌ Ошибка при обновлении IP: сервер вернул успех=false")
+                                return False
                         else:
-                            print("Ошибка при обновлении IP: сервер вернул успех=false")
+                            print(f"❌ Ошибка при обновлении IP прокси. Код ответа: {response.status}")
                             return False
-                    else:
-                        print(f"Ошибка при обновлении IP прокси. Код ответа: {response.status}")
-                        return False
         except Exception as e:
-            print(f"Ошибка при обновлении IP прокси: {str(e)}")
+            print(f"❌ Ошибка при обновлении IP прокси: {str(e)}")
             return False
     
     async def check_proxy_connection(self, page):
@@ -587,6 +704,9 @@ class TikTokManager:
             return False, []
                 
         except Exception as e:
+            if "PROXY_PAYMENT_REQUIRED" in str(e):
+                # Пробрасываем критическую ошибку выше
+                raise
             print(f"Ошибка при проверке прокси: {str(e)}")
             return False, []
     
@@ -619,12 +739,23 @@ class TikTokManager:
                 ) as response:
                     if response.status == 200:
                         return await response.json()
+                    elif response.status == 402:
+                        # Критическая ошибка - проблема с оплатой прокси
+                        raise Exception("PROXY_PAYMENT_REQUIRED")
                     else:
                         print(f"Ошибка ipinfo.io API: статус {response.status}")
                         return None
                         
+        except aiohttp.ClientResponseError as e:
+            if e.status == 402:
+                raise Exception("PROXY_PAYMENT_REQUIRED")
+            print(f"Ошибка при запросе к ipinfo.io: {e.status}, {e.message}")
+            return None
         except Exception as e:
-            print(f"Ошибка при запросе к ipinfo.io: {str(e)}")
+            error_msg = str(e)
+            if "PROXY_PAYMENT_REQUIRED" in error_msg:
+                raise
+            print(f"Ошибка при запросе к ipinfo.io: {error_msg}")
             return None
     
     def extract_ip_from_content(self, content, service_name=None):
@@ -795,67 +926,183 @@ class TikTokManager:
             self.mark_screenshot_directory(cookie_file, False)
             return False
         
+        # Получаем рабочий прокси для текущей сессии (с глобальными лимитами)
+        if self.use_free_proxy:
+            if not self.proxy:
+                print("🔍 Получение бесплатного прокси для сессии...")
+                max_proxy_attempts = 3  # Уменьшаем, так как теперь есть глобальные лимиты
+                proxy_attempt = 0
+                
+                while proxy_attempt < max_proxy_attempts:
+                    proxy_attempt += 1
+                    print(f"🔄 Попытка {proxy_attempt}/{max_proxy_attempts} получения прокси...")
+                    
+                    self.proxy = await get_primary_proxy()
+                    if self.proxy:
+                        print(f"✅ Получен прокси: {self.proxy['server']}")
+                        break
+                    else:
+                        print(f"❌ Не удалось получить прокси на попытке {proxy_attempt}")
+                        
+                        # Проверяем, не заблокирован ли поиск прокси глобально
+                        from free_proxy_integration import get_proxy_manager
+                        manager = get_proxy_manager()
+                        if manager.is_proxy_search_blocked():
+                            stats = manager.get_failure_stats()
+                            print(f"🛑 Поиск прокси заблокирован глобально:")
+                            print(f"   Всего неудач: {stats['total_failed']}/{stats['max_total']}")
+                            print(f"   Подряд неудач: {stats['consecutive_failed']}/{stats['max_consecutive']}")
+                            print("⏹️  Остановка обработки - все источники прокси недоступны")
+                            self.mark_screenshot_directory(cookie_file, None)
+                            return False
+                    
+                    # Небольшая пауза между попытками
+                    if proxy_attempt < max_proxy_attempts:
+                        await asyncio.sleep(1)
+                
+                if not self.proxy:
+                    print("❌ Не удалось получить рабочий бесплатный прокси после всех попыток")
+                    print("⚠️  Пропускаем этот аккаунт - проблема с прокси, а не с куками")
+                    self.mark_screenshot_directory(cookie_file, None)  # Помечаем как пропущенный
+                    return False
+        
         # Выводим текущие настройки прокси для отладки
-        print("Текущие настройки прокси:")
-        print(f"- Сервер: {self.proxy['server']}")
-        print(f"- Логин: {self.proxy['username']}")
-        print(f"- Пароль: {'*' * len(self.proxy['password'])}")
-        print(f"- Режим ротации: {'Включен' if self.use_proxy_rotation else 'Выключен'}")
+        if self.proxy_disabled:
+            print("🚫 Работа без прокси (прокси отключен)")
+        elif self.proxy:
+            print("Текущие настройки прокси:")
+            print(f"- Тип: {'Бесплатный' if self.use_free_proxy else 'Платный'}")
+            print(f"- Сервер: {self.proxy['server']}")
+            if self.proxy.get('username'):
+                print(f"- Логин: {self.proxy['username']}")
+                print(f"- Пароль: {'*' * len(self.proxy['password']) if self.proxy.get('password') else 'Нет'}")
+            else:
+                print("- Авторизация: Не требуется")
+            print(f"- Режим ротации: {'Включен' if self.use_proxy_rotation else 'Выключен'}")
+        else:
+            print("❌ Прокси не настроен!")
+            return False
         
         try:
             async with async_playwright() as p:
                 browser = await p.firefox.launch(headless=False)
                 
-                # Выводим информацию о прокси перед созданием контекста
-                print("Применяем настройки прокси:")
-                print(f"- Сервер: {self.proxy['server']}")
-                print(f"- Логин: {self.proxy['username']}")
-                print(f"- Пароль: {'*' * len(self.proxy['password'])}")
-                
-                context = await browser.new_context(
-                    proxy=self.proxy,
-                    locale=config.DEFAULT_LOCALE,  # Используем локаль из файла конфигурации
-                    user_agent=config.DEFAULT_USER_AGENT  # Используем user agent из файла конфигурации
-                )
+                # Создаем контекст (с прокси или без)
+                if self.proxy_disabled or not self.proxy:
+                    # Без прокси
+                    context = await browser.new_context(
+                        locale=config.DEFAULT_LOCALE,
+                        user_agent=config.DEFAULT_USER_AGENT
+                    )
+                else:
+                    # С прокси
+                    print("Применяем настройки прокси:")
+                    print(f"- Сервер: {self.proxy['server']}")
+                    if self.proxy.get('username'):
+                        print(f"- Логин: {self.proxy['username']}")
+                        print(f"- Пароль: {'*' * len(self.proxy['password']) if self.proxy.get('password') else 'Нет'}")
+                    else:
+                        print("- Авторизация: Не требуется")
+                    
+                    # Создаем контекст с прокси (убираем None значения для бесплатных прокси)
+                    proxy_config = {k: v for k, v in self.proxy.items() if v is not None}
+                    
+                    context = await browser.new_context(
+                        proxy=proxy_config,
+                        locale=config.DEFAULT_LOCALE,
+                        user_agent=config.DEFAULT_USER_AGENT
+                    )
                 
                 # Установить cookies
                 await context.add_cookies(cookies)
                 page = await context.new_page()
                 
-                # Проверяем работу прокси в начале сессии
-                print("Проверка работы прокси в начале сессии...")
-                proxy_works, proxy_ips = await self.check_proxy_connection(page)
-                if proxy_works:
-                    print("Прокси работает корректно")
-                else:
-                    print("Предупреждение: Прокси не работает корректно")
+                # Проверяем работу прокси в начале сессии (только если прокси включен)
+                if not self.proxy_disabled and self.proxy:
+                    print("Проверка работы прокси в начале сессии...")
+                    proxy_works = False
+                    
+                    while not proxy_works:
+                        try:
+                            proxy_works, proxy_ips = await self.check_proxy_connection(page)
+                            if proxy_works:
+                                print("✅ Прокси работает корректно")
+                                break
+                        except Exception as e:
+                            print("⚠️  Прокси не работает корректно")
+                            
+                            if self.use_free_proxy:
+                                # Удаляем нерабочий прокси из кэша
+                                from free_proxy_integration import get_proxy_manager
+                                manager = get_proxy_manager()
+                                if self.proxy:
+                                    manager.remove_proxy_from_cache(self.proxy['server'])
+                                
+                                print("🔄 Получаем новый бесплатный прокси...")
+                                
+                                # Закрываем текущий браузер
+                                await browser.close()
+                                
+                                # Получаем новый прокси (будет крутиться пока не получит рабочий)
+                                self.proxy = await get_primary_proxy()
+                                if not self.proxy:
+                                    # Если глобально заблокирован поиск прокси - выходим без маркировки
+                                    if manager.is_proxy_search_blocked():
+                                        print("🛑 Поиск прокси заблокирован глобально")
+                                        print("⏭️  Пропускаем - проблема с прокси, не с куками")
+                                        self.mark_screenshot_directory(cookie_file, None)
+                                        return False
+                                    
+                                    # Ждём и пробуем снова
+                                    print("⏳ Ждём 5 секунд и пробуем снова...")
+                                    await asyncio.sleep(5)
+                                    self.proxy = await get_primary_proxy()
+                                    if not self.proxy:
+                                        print("❌ Не удалось получить прокси, пропускаем")
+                                        self.mark_screenshot_directory(cookie_file, None)
+                                        return False
+                                
+                                print(f"✅ Получен новый прокси: {self.proxy['server']}")
+                                
+                                # Создаем новый браузер с новым прокси
+                                browser = await p.firefox.launch(headless=False)
+                                proxy_config = {k: v for k, v in self.proxy.items() if v is not None}
+                                context = await browser.new_context(
+                                    proxy=proxy_config,
+                                    locale=config.DEFAULT_LOCALE,
+                                    user_agent=config.DEFAULT_USER_AGENT
+                                )
+                                await context.add_cookies(cookies)
+                                page = await context.new_page()
+                                # Продолжаем цикл с новым прокси
+                            else:
+                                # Платный прокси - пробуем обновить IP
+                                print("🔄 Пробуем обновить IP платного прокси...")
+                                await self.refresh_proxy_ip()
+                                await asyncio.sleep(2)
+                                # Продолжаем цикл
                 
-                # Проверяем авторизацию
+                # Проверяем авторизацию (уже переходит на страницу загрузки)
                 is_authenticated = await self.check_authentication(page)
                 
-                if is_authenticated:
-                    # Переходим на страницу загрузки
-                    try:
-                        await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='load')
-                        await page.wait_for_timeout(5000)  # Ждем 5 секунд для загрузки страницы
-                    except Exception as upload_nav_error:
-                        error_text = str(upload_nav_error).lower()
-                        
-                        # Проверяем, связана ли ошибка с SSL или прокси
-                        if any(err in error_text for err in ['ssl_error', 'ssl error', 'proxy', 'connection', 'timeout', 'connect']):
-                            print(f"Ошибка соединения при переходе на страницу загрузки: {upload_nav_error}")
-                            print("Пропускаем обработку - эта ошибка не связана с валидностью куки")
-                            self.mark_screenshot_directory(cookie_file, None)  # Не помечаем ни валидным, ни невалидным
-                            return False
-                        else:
-                            # Другие ошибки навигации могут быть связаны с куки
-                            raise  # Перебросим ошибку для обработки в блоке catch ниже
+                if is_authenticated == "timeout":
+                    # Таймаут загрузки страницы - проблема с прокси/сетью, не с куками
+                    print("⚠️  Таймаут при загрузке - пропускаем без пометки invalid")
                     
-                    # Обрабатываем диалог согласия на cookie на странице загрузки
-                    await self.handle_cookie_consent(page)
+                    # Удаляем прокси из кэша — он не работает для TikTok
+                    if self.use_free_proxy and self.proxy:
+                        from free_proxy_integration import get_proxy_manager
+                        proxy_manager = get_proxy_manager()
+                        proxy_server = self.proxy.get('server', '')
+                        proxy_manager.remove_proxy_from_cache(proxy_server)
+                        print(f"🗑️ Прокси {proxy_server} удалён из кэша из-за таймаута")
                     
-                    # Обрабатываем информационные модальные окна с кнопкой "Понятно"
-                    await self.handle_info_modals(page)
+                    self.mark_screenshot_directory(cookie_file, None)  # skipped
+                    return False
+                
+                if is_authenticated == True:
+                    # Мы уже на странице загрузки после check_authentication
+                    # Не нужен дополнительный переход - экономим трафик
                     
                     # Делаем скриншот страницы загрузки
                     await self.take_screenshot(page, "tiktok_upload_page.png")
@@ -863,12 +1110,17 @@ class TikTokManager:
                     # Загружаем видео
                     upload_success = await self.upload_video(page, video_path)
                     
-                    if upload_success:
+                    if upload_success == True:
                         print("Загрузка и публикация видео выполнены")
                         
-                        # Получаем никнейм пользователя и ссылку на видео
-                        username = await self.get_tiktok_username(page)
+                        # Сначала получаем ссылку на видео (идёт на страницу контента)
                         video_url = await self.get_published_video_url(page)
+                        
+                        # Извлекаем username из URL видео (без доп. переходов)
+                        username = self.extract_username_from_video_url(video_url)
+                        if not username:
+                            # Пробуем получить из HTML если не нашли в URL
+                            username = await self.get_tiktok_username(page)
                         
                         # Сохраняем результат загрузки в JSON
                         self.save_upload_result(cookie_file, username, video_url)
@@ -878,6 +1130,34 @@ class TikTokManager:
                         # Ждем некоторое время перед закрытием браузера
                         await page.wait_for_timeout(3000)  # 3 секунд
                         return True
+                    elif upload_success == "page_not_loaded":
+                        # Страница не загрузилась - проблема с прокси/сетью, не с куками
+                        print("⚠️  Страница не загрузилась полностью - пропускаем без пометки invalid")
+                        
+                        # Удаляем прокси из кэша
+                        if self.use_free_proxy and self.proxy:
+                            from free_proxy_integration import get_proxy_manager
+                            proxy_manager = get_proxy_manager()
+                            proxy_server = self.proxy.get('server', '')
+                            proxy_manager.remove_proxy_from_cache(proxy_server)
+                            print(f"🗑️ Прокси {proxy_server} удалён из кэша")
+                        
+                        self.mark_screenshot_directory(cookie_file, None)  # skipped
+                        return False
+                    elif upload_success == "publish_failed":
+                        # Видео выбрано, но публикация не удалась - аккаунт валидный, проблема с сетью
+                        print("⚠️  Публикация не удалась, но аккаунт валидный - пропускаем без пометки invalid")
+                        
+                        # Удаляем прокси из кэша
+                        if self.use_free_proxy and self.proxy:
+                            from free_proxy_integration import get_proxy_manager
+                            proxy_manager = get_proxy_manager()
+                            proxy_server = self.proxy.get('server', '')
+                            proxy_manager.remove_proxy_from_cache(proxy_server)
+                            print(f"🗑️ Прокси {proxy_server} удалён из кэша")
+                        
+                        self.mark_screenshot_directory(cookie_file, None)  # skipped
+                        return False
                     else:
                         print("Не удалось загрузить или опубликовать видео")
                         
@@ -894,8 +1174,14 @@ class TikTokManager:
         except Exception as e:
             error_text = str(e).lower()
             
-            # Проверяем, связана ли ошибка с SSL или прокси
-            if any(err in error_text for err in ['ssl_error', 'ssl error', 'proxy', 'connection', 'timeout', 'connect']):
+            # Проверяем, связана ли ошибка с SSL, прокси или сетью
+            if any(err in error_text for err in [
+                'ssl_error', 'ssl error', 'proxy', 'connection', 'timeout', 'connect',
+                'ns_error_unknown_host', 'network error', 'dns', 'host not found',
+                'connection refused', 'connection reset', 'connection aborted',
+                'bad request', '400', '502', '503', '504', 'gateway', 'unreachable',
+                'net::err', 'socket', 'econnrefused', 'etimedout', 'enetunreach'
+            ]):
                 print(f"Ошибка соединения: {e}")
                 traceback.print_exc()
                 print("Пропускаем обработку - эта ошибка не связана с валидностью куки")
@@ -912,151 +1198,93 @@ class TikTokManager:
                 return False
     
     async def check_authentication(self, page):
-        """Проверяет, авторизован ли пользователь на TikTok"""
+        """
+        Проверяет, авторизован ли пользователь на TikTok.
+        Оптимизировано для экономии трафика - сразу идём на страницу загрузки.
+        
+        Returns:
+            True - авторизован
+            False - не авторизован (куки невалидные)
+            "timeout" - таймаут загрузки (проблема сети/прокси, не помечать как invalid)
+        """
         try:
-            print("Проверка авторизации...")
+            print("Проверка авторизации (оптимизированная)...")
             
-            # Переходим на главную страницу TikTok
-            await page.goto("https://www.tiktok.com", wait_until='domcontentloaded', timeout=60000)
+            # Сразу переходим на страницу загрузки TikTok Studio
+            # Это экономит трафик - не грузим тяжёлую главную страницу с видео
+            print("Переход на страницу загрузки TikTok Studio...")
+            await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='domcontentloaded', timeout=60000)
             
-            # Ждем загрузки основного контента (увеличено время)
-            print("Ожидание загрузки страницы...")
-            await page.wait_for_timeout(8000)
+            # Ждём загрузки и возможных редиректов
+            await page.wait_for_timeout(5000)
             
-            # Делаем скриншот главной страницы
-            await self.take_screenshot(page, "tiktok_main_page.png")
+            # Проверяем URL после загрузки
+            current_url = page.url.lower()
+            print(f"Текущий URL: {page.url}")
             
-            # Обрабатываем диалог согласия на cookie, если он появился
-            await self.handle_cookie_consent(page)
+            # Если перекинуло на страницу логина - не авторизован
+            if 'login' in current_url or 'signin' in current_url:
+                print("Перенаправлены на страницу входа - пользователь не авторизован")
+                await self.take_screenshot(page, "tiktok_not_authenticated.png")
+                return False
             
-            # Обрабатываем информационные модальные окна с кнопкой "Понятно"
-            await self.handle_info_modals(page)
-            
-            # Дополнительное ожидание после обработки cookie consent
-            await page.wait_for_timeout(3000)
-            
-            # Расширенный список селекторов для проверки авторизации
-            # Селекторы аватара/профиля (признак авторизации)
-            avatar_selectors = [
-                '[data-e2e="user-avatar"]',
-                '[data-e2e="profile-icon"]', 
-                '[data-e2e="nav-profile"]',
-                '.avatar-wrapper',
-                '.user-avatar',
-                'div[class*="DivAvatarContainer"]',
-                'div[class*="AvatarContainer"]',
-                'img[class*="ImgAvatar"]',
-                'a[href*="/profile"]',
-                '[data-e2e="nav-foryou"] ~ *[data-e2e*="profile"]',
-            ]
-            
-            # Селекторы кнопки загрузки (признак авторизации)
-            upload_selectors = [
-                '[data-e2e="upload-icon"]',
-                '[aria-label="Upload"]',
-                '[aria-label="Загрузить"]',
-                '.upload-icon',
-                'a[href*="/upload"]',
-                'div[class*="DivUploadButton"]',
-            ]
-            
-            # Селекторы кнопки входа (признак отсутствия авторизации)
-            login_selectors = [
-                '[data-e2e="top-login-button"]',
-                'button:has-text("Войти")',
-                'button:has-text("Login")',
-                'button:has-text("Log in")',
-                'button:has-text("Sign in")',
-                'div[class*="DivLoginButton"]',
-                '[data-e2e="login-button"]',
-            ]
-            
-            # Проверяем наличие элементов авторизации
-            avatar = None
-            for selector in avatar_selectors:
-                try:
-                    avatar = await page.query_selector(selector)
-                    if avatar:
-                        print(f"Найден элемент аватара: {selector}")
-                        break
-                except:
-                    continue
-            
-            upload_icon = None
-            for selector in upload_selectors:
-                try:
-                    upload_icon = await page.query_selector(selector)
-                    if upload_icon:
-                        print(f"Найден элемент загрузки: {selector}")
-                        break
-                except:
-                    continue
-            
-            # Проверяем наличие кнопки входа
-            login_button = None
-            for selector in login_selectors:
-                try:
-                    login_button = await page.query_selector(selector)
-                    if login_button:
-                        print(f"Найдена кнопка входа: {selector}")
-                        break
-                except:
-                    continue
-            
-            # Дополнительная проверка через URL или содержимое страницы
-            current_url = page.url
-            page_content = await page.content()
-            
-            # Проверяем признаки авторизации в HTML
-            auth_indicators = [
-                '"isLogin":true',
-                '"loginStatus":1',
-                'uniqueId',
-                '"nickname"',
-            ]
-            
-            has_auth_indicator = any(indicator in page_content for indicator in auth_indicators)
-            if has_auth_indicator:
-                print("Обнаружены признаки авторизации в HTML")
-            
-            # Определяем статус авторизации
-            is_authenticated = (avatar is not None or upload_icon is not None or has_auth_indicator) and login_button is None
-            
-            # Если не нашли явных признаков, пробуем перейти на страницу профиля
-            if not is_authenticated and login_button is None:
-                print("Проверяем авторизацию через переход на страницу загрузки...")
-                try:
-                    await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='domcontentloaded', timeout=30000)
-                    await page.wait_for_timeout(5000)
-                    await self.take_screenshot(page, "tiktok_studio_check.png")
-                    
-                    studio_url = page.url
-                    # Если нас не перенаправило на страницу входа - мы авторизованы
-                    if 'login' not in studio_url.lower() and 'studio' in studio_url.lower():
-                        print("Успешный доступ к TikTok Studio - пользователь авторизован")
-                        is_authenticated = True
-                except Exception as e:
-                    print(f"Ошибка при проверке через Studio: {str(e)}")
-            
-            if is_authenticated:
-                print("Пользователь авторизован на TikTok")
+            # Если остались на странице studio/upload - авторизован
+            if 'studio' in current_url or 'upload' in current_url:
+                print("Успешный доступ к TikTok Studio - пользователь авторизован")
                 
-                # Переходим на страницу TikTok Studio для дальнейшей работы
-                if 'studio' not in page.url.lower():
-                    await page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until='domcontentloaded', timeout=60000)
-                    await page.wait_for_timeout(5000)
+                # Обрабатываем диалог согласия на cookie, если он появился
+                await self.handle_cookie_consent(page)
+                
+                # Обрабатываем информационные модальные окна
+                await self.handle_info_modals(page)
                 
                 # Делаем скриншот страницы загрузки
                 await self.take_screenshot(page, "tiktok_studio_page.png")
                 
                 return True
-            else:
-                print("Пользователь не авторизован на TikTok")
-                await self.take_screenshot(page, "tiktok_not_authenticated.png")
-                
-                return False
+            
+            # Дополнительная проверка - ищем элементы формы загрузки
+            file_input = await page.query_selector('input[type="file"]')
+            if file_input:
+                print("Найдена форма загрузки - пользователь авторизован")
+                await self.handle_cookie_consent(page)
+                await self.handle_info_modals(page)
+                await self.take_screenshot(page, "tiktok_studio_page.png")
+                return True
+            
+            # Проверяем наличие кнопки входа на странице
+            login_selectors = [
+                '[data-e2e="top-login-button"]',
+                'button:has-text("Войти")',
+                'button:has-text("Login")',
+                'button:has-text("Log in")',
+            ]
+            
+            for selector in login_selectors:
+                try:
+                    login_button = await page.query_selector(selector)
+                    if login_button:
+                        print(f"Найдена кнопка входа: {selector} - пользователь не авторизован")
+                        await self.take_screenshot(page, "tiktok_not_authenticated.png")
+                        return False
+                except:
+                    continue
+            
+            # Если дошли сюда и нет явных признаков - считаем авторизованным
+            print("Нет признаков отсутствия авторизации - считаем авторизованным")
+            await self.handle_cookie_consent(page)
+            await self.handle_info_modals(page)
+            await self.take_screenshot(page, "tiktok_studio_page.png")
+            return True
                 
         except Exception as e:
+            error_text = str(e).lower()
+            # Проверяем, это таймаут или другая сетевая ошибка
+            if 'timeout' in error_text or 'exceeded' in error_text:
+                print(f"⏱️ Таймаут при загрузке страницы: {str(e)}")
+                await self.take_screenshot(page, "tiktok_timeout_error.png")
+                return "timeout"  # Специальное значение - не помечать как invalid
+            
             print(f"Ошибка при проверке авторизации: {str(e)}")
             await self.take_screenshot(page, "tiktok_auth_check_error.png")
             return False
@@ -1182,7 +1410,8 @@ class TikTokManager:
                     cancel_button = await page.query_selector(selector)
                     if cancel_button:
                         print(f"Найдена кнопка 'Отмена', нажимаем...")
-                        await cancel_button.click()
+                        # Используем force=True чтобы обойти перехват overlay
+                        await cancel_button.click(force=True)
                         await page.wait_for_timeout(1000)
                         print("Окно автоматической проверки контента закрыто")
                         await self.take_screenshot(page, "content_check_modal_closed.png")
@@ -1192,7 +1421,7 @@ class TikTokManager:
                 close_button = await page.query_selector('[aria-label="Close"], [aria-label="Закрыть"], button svg, .modal-close')
                 if close_button:
                     print("Кнопка 'Отмена' не найдена, закрываем крестиком...")
-                    await close_button.click()
+                    await close_button.click(force=True)
                     await page.wait_for_timeout(1000)
                     return True
                     
@@ -1284,6 +1513,45 @@ class TikTokManager:
             
         except Exception as e:
             print(f"Ошибка при обработке информационных модальных окон: {str(e)}")
+            return False
+    
+    async def close_blocking_modals(self, page):
+        """
+        Быстро закрывает модалки которые могут блокировать кнопку Опубликовать.
+        Не ждёт если модалки нет — просто пытается закрыть и идёт дальше.
+        """
+        try:
+            # Кликаем в пустое место чтобы сбить фокус с модалки (если она есть)
+            # Координаты 600, 50 - верхняя часть страницы, подальше от кнопок
+            await page.mouse.click(600, 50)
+            await page.wait_for_timeout(300)
+            
+            # Пробуем закрыть модалку "Понятно" (Добавлены новые функции редактирования)
+            ponyatno_selectors = [
+                'button:has-text("Понятно")',
+                'div:has-text("Понятно"):not(:has(*))',  # div без детей с текстом Понятно
+                '[class*="Button"]:has-text("Понятно")',
+            ]
+            
+            for selector in ponyatno_selectors:
+                try:
+                    button = await page.query_selector(selector)
+                    if button:
+                        print("🔘 Закрываем модалку 'Понятно'...")
+                        await button.click()
+                        await page.wait_for_timeout(500)
+                        return True
+                except:
+                    pass
+            
+            # Пробуем нажать Escape чтобы закрыть любую модалку
+            await page.keyboard.press('Escape')
+            await page.wait_for_timeout(300)
+            
+            return False
+            
+        except Exception as e:
+            # Игнорируем ошибки — это не критично
             return False
     
     async def check_whoer_ip(self, page, stage_name=""):

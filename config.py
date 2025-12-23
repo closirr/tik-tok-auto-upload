@@ -4,21 +4,44 @@ from dotenv import load_dotenv
 # Загружаем переменные окружения из файла .env
 load_dotenv()
 
-# Настройки прокси из .env
-# Playwright требует определенный формат для прокси
-# https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-option-proxy
-PROXY = {
-    'server': f"http://{os.getenv('PROXY_SERVER')}:{os.getenv('PROXY_PORT')}",
+# Флаг отключения прокси (если True - прокси не используется)
+PROXY_DISABLED = os.getenv('PROXY_DISABLED', 'false').lower() == 'true'
+
+# Режим прокси: 'free' для бесплатных прокси, 'paid' для платных
+PROXY_MODE = os.getenv('PROXY_MODE', 'free').lower()
+
+# Настройки для платных прокси (старая конфигурация)
+PAID_PROXY = {
+    'server': f"http://{os.getenv('PROXY_SERVER')}:{os.getenv('PROXY_PORT')}" if os.getenv('PROXY_SERVER') else None,
     'username': os.getenv('PROXY_USERNAME'),
     'password': os.getenv('PROXY_PASSWORD')
 }
 
-# URL для обновления IP прокси из .env
+# Настройки для бесплатных прокси (оптимизированные)
+FREE_PROXY_CONFIG = {
+    'country_id': os.getenv('FREE_PROXY_COUNTRIES', 'US,GB,DE,CA,AU,NL,FR').split(','),  # Больше стран для выбора
+    'https': os.getenv('FREE_PROXY_HTTPS', 'false').lower() == 'true',      # Требовать HTTPS
+    'anonym': os.getenv('FREE_PROXY_ANONYM', 'true').lower() == 'true',     # Требовать анонимность
+    'timeout': float(os.getenv('FREE_PROXY_TIMEOUT', '4.0')),              # Уменьшенный таймаут для быстрого отсева
+    'pool_size': int(os.getenv('FREE_PROXY_POOL_SIZE', '3')),              # Меньший пул для экономии времени
+    'cache_time': int(os.getenv('FREE_PROXY_CACHE_TIME', '180'))           # Уменьшенное время кэша (3 мин)
+}
+
+# Основная конфигурация прокси (выбирается по PROXY_MODE)
+if PROXY_DISABLED:
+    PROXY = None
+    USE_FREE_PROXY = False
+elif PROXY_MODE == 'free':
+    PROXY = None  # Будет устанавливаться динамически через FreeProxyManager
+    USE_FREE_PROXY = True
+else:
+    PROXY = PAID_PROXY
+    USE_FREE_PROXY = False
+
+# URL для обновления IP прокси из .env (только для платных прокси)
 PROXY_REFRESH_URL = os.getenv('PROXY_REFRESH_URL')
 
 # Флаг использования ротации прокси
-# Если True - используется режим ротации (каждый запрос через новый IP)
-# Если False - используется обновление IP через API
 USE_PROXY_ROTATION_ENV = os.getenv('USE_PROXY_ROTATION', 'true').lower()
 USE_PROXY_ROTATION = USE_PROXY_ROTATION_ENV == 'true'
 
@@ -38,4 +61,4 @@ IPINFO_TOKEN = os.getenv('IPINFO_TOKEN')
 # Если True - сначала обрабатываются файлы с префиксом valid_, потом остальные
 # Если False - обрабатываются только необработанные файлы (без префиксов valid_/invalid_)
 
-PROCESS_VALID_FIRST = 'false' 
+PROCESS_VALID_FIRST = False 
