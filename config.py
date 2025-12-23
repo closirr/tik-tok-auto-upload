@@ -29,4 +29,13 @@ DEFAULT_LOCALE = 'ru-RU'
 # Директории по умолчанию
 DEFAULT_COOKIES_DIR = 'cookies'
 DEFAULT_VIDEOS_DIR = 'videos'
-DEFAULT_SCREENSHOTS_DIR = 'screenshots' 
+DEFAULT_SCREENSHOTS_DIR = 'screenshots'
+
+# Токен для ipinfo.io API
+IPINFO_TOKEN = os.getenv('IPINFO_TOKEN')
+
+# Приоритет обработки файлов с куками
+# Если True - сначала обрабатываются файлы с префиксом valid_, потом остальные
+# Если False - обрабатываются только необработанные файлы (без префиксов valid_/invalid_)
+
+PROCESS_VALID_FIRST = 'false' 

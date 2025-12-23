@@ -1,6 +1,7 @@
 import asyncio
 from tiktok_manager import TikTokManager
 from tiktok_cookies_loader import CookiesLoader
+import config
 
 async def main():
     print("Запуск TikTok Auto Upload")
@@ -13,7 +14,13 @@ async def main():
     cookies_loader = CookiesLoader()
     
     # Получаем список файлов с куками для обработки
-    cookie_files = cookies_loader.get_cookie_files()
+    # Если PROCESS_VALID_FIRST=true, сначала обрабатываем valid_ файлы
+    if config.PROCESS_VALID_FIRST:
+        print("Режим: сначала valid_ файлы, потом остальные")
+        cookie_files = cookies_loader.get_cookie_files_with_valid_priority()
+    else:
+        print("Режим: только необработанные файлы")
+        cookie_files = cookies_loader.get_cookie_files()
     
     if not cookie_files:
         print("Не найдено файлов с куками для обработки")
@@ -29,7 +36,7 @@ async def main():
         
         # Добавляем задержку между обработкой аккаунтов, кроме последнего
         if i < len(cookie_files) - 1:
-            delay = 3  # 30 секунд между аккаунтами
+            delay = 3  # 3 секунды между аккаунтами
             print(f"Ожидание {delay} секунд перед обработкой следующего аккаунта...")
             await asyncio.sleep(delay)
     

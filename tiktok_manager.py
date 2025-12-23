@@ -11,6 +11,9 @@ from tiktok_cookies_loader import CookiesLoader
 import datetime
 import config  # Импортируем файл конфигурации
 
+# Файл для сохранения результатов загрузки
+UPLOAD_RESULTS_FILE = "upload_results.json"
+
 class TikTokManager:
     def __init__(self, cookies_dir=config.DEFAULT_COOKIES_DIR, videos_dir=config.DEFAULT_VIDEOS_DIR, screenshots_dir=config.DEFAULT_SCREENSHOTS_DIR):
         self.cookies_dir = cookies_dir
@@ -26,6 +29,156 @@ class TikTokManager:
         for directory in [videos_dir, cookies_dir, screenshots_dir]:
             if not os.path.exists(directory):
                 os.makedirs(directory)
+    
+    def save_upload_result(self, cookie_file, username, video_url):
+        """
+        Сохраняет результат успешной загрузки видео в JSON файл
+        
+        Args:
+            cookie_file: Полное имя файла с куками
+            username: Никнейм аккаунта TikTok
+            video_url: Ссылка на опубликованное видео
+        """
+        try:
+            # Загружаем существующие результаты
+            results = []
+            if os.path.exists(UPLOAD_RESULTS_FILE):
+                with open(UPLOAD_RESULTS_FILE, 'r', encoding='utf-8') as f:
+                    results = json.load(f)
+            
+            # Добавляем новый результат
+            result = {
+                "cookie_file": os.path.basename(cookie_file),
+                "username": username,
+                "video_url": video_url,
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+            results.append(result)
+            
+            # Сохраняем обратно в файл
+            with open(UPLOAD_RESULTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            
+            print(f"Результат загрузки сохранен в {UPLOAD_RESULTS_FILE}")
+            return True
+        except Exception as e:
+            print(f"Ошибка при сохранении результата загрузки: {str(e)}")
+            return False
+    
+    async def get_tiktok_username(self, page):
+        """
+        Получает никнейм пользователя TikTok со страницы
+        
+        Args:
+            page: Объект страницы Playwright
+            
+        Returns:
+            str: Никнейм пользователя или None если не удалось получить
+        """
+        try:
+            print("Получение никнейма пользователя...")
+            
+            # Способ 1: Ищем в HTML странице
+            page_content = await page.content()
+            
+            # Ищем uniqueId в JSON данных страницы
+            unique_id_match = re.search(r'"uniqueId"\s*:\s*"([^"]+)"', page_content)
+            if unique_id_match:
+                username = unique_id_match.group(1)
+                print(f"Найден никнейм (uniqueId): {username}")
+                return username
+            
+            # Способ 2: Ищем nickname
+            nickname_match = re.search(r'"nickname"\s*:\s*"([^"]+)"', page_content)
+            if nickname_match:
+                username = nickname_match.group(1)
+                print(f"Найден никнейм (nickname): {username}")
+                return username
+            
+            # Способ 3: Переходим на страницу профиля и получаем из URL
+            try:
+                await page.goto("https://www.tiktok.com/tiktokstudio/creator-center", wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(3000)
+                
+                # Ищем элемент с никнеймом на странице Creator Center
+                username_element = await page.query_selector('[data-e2e="creator-center-username"], .username, [class*="UserName"]')
+                if username_element:
+                    username = await username_element.inner_text()
+                    if username:
+                        print(f"Найден никнейм на странице: {username}")
+                        return username.strip().replace('@', '')
+            except Exception as e:
+                print(f"Не удалось получить никнейм со страницы Creator Center: {str(e)}")
+            
+            print("Не удалось получить никнейм пользователя")
+            return None
+            
+        except Exception as e:
+            print(f"Ошибка при получении никнейма: {str(e)}")
+            return None
+    
+    async def get_published_video_url(self, page):
+        """
+        Получает ссылку на опубликованное видео
+        
+        Args:
+            page: Объект страницы Playwright
+            
+        Returns:
+            str: URL видео или None если не удалось получить
+        """
+        try:
+            print("Получение ссылки на опубликованное видео...")
+            
+            # Ждем перенаправления на страницу контента
+            await page.wait_for_timeout(3000)
+            
+            current_url = page.url
+            
+            # Если мы на странице контента, ищем последнее видео
+            if '/tiktokstudio/content' in current_url or '/creator' in current_url:
+                # Ищем первое видео в списке (последнее загруженное)
+                video_link = await page.query_selector('a[href*="/video/"], [data-e2e="content-card"] a, .video-card a')
+                if video_link:
+                    href = await video_link.get_attribute('href')
+                    if href:
+                        # Формируем полный URL если нужно
+                        if href.startswith('/'):
+                            href = f"https://www.tiktok.com{href}"
+                        print(f"Найдена ссылка на видео: {href}")
+                        return href
+            
+            # Способ 2: Ищем в HTML странице
+            page_content = await page.content()
+            video_url_match = re.search(r'https://www\.tiktok\.com/@[^/]+/video/\d+', page_content)
+            if video_url_match:
+                video_url = video_url_match.group(0)
+                print(f"Найдена ссылка на видео в HTML: {video_url}")
+                return video_url
+            
+            # Способ 3: Переходим на страницу контента и ищем там
+            try:
+                await page.goto("https://www.tiktok.com/tiktokstudio/content", wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(5000)
+                
+                # Ищем первое видео в списке
+                video_link = await page.query_selector('a[href*="/video/"]')
+                if video_link:
+                    href = await video_link.get_attribute('href')
+                    if href:
+                        if href.startswith('/'):
+                            href = f"https://www.tiktok.com{href}"
+                        print(f"Найдена ссылка на видео на странице контента: {href}")
+                        return href
+            except Exception as e:
+                print(f"Не удалось получить ссылку со страницы контента: {str(e)}")
+            
+            print("Не удалось получить ссылку на видео")
+            return None
+            
+        except Exception as e:
+            print(f"Ошибка при получении ссылки на видео: {str(e)}")
+            return None
             
     def prepare_screenshot_directory(self, cookie_file):
         """
@@ -295,7 +448,7 @@ class TikTokManager:
             description_field = await page.query_selector('textarea[placeholder*="описание"], textarea[placeholder*="description"], [data-e2e="upload-desc"]')
             if description_field:
                 print("Заполняем поле описания")
-                await description_field.fill("Интересное видео #viral #trending")
+                await description_field.fill("Цікаве відео вео3 банана про #viral #trending")
                 await page.wait_for_timeout(1000)
             
             # Проверяем IP после заполнения описания - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
@@ -315,17 +468,27 @@ class TikTokManager:
                 # await self.check_whoer_ip(page, "после_нажатия_далее")
 
             
-            # Проверяем наличие чекбоксов и переключателей
+            # Проверяем наличие ВИДИМЫХ чекбоксов и переключателей
             checkboxes = await page.query_selector_all('input[type="checkbox"]')
+            checked_count = 0
             for i, checkbox in enumerate(checkboxes):
                 try:
+                    # Проверяем видимость чекбокса перед работой с ним
+                    is_visible = await checkbox.is_visible()
+                    if not is_visible:
+                        continue  # Пропускаем невидимые чекбоксы
+                    
                     is_checked = await checkbox.is_checked()
                     if not is_checked:
                         print(f"Отмечаем чекбокс {i+1}")
-                        await checkbox.check()
+                        await checkbox.check(timeout=5000)  # Уменьшаем таймаут
+                        checked_count += 1
                         await page.wait_for_timeout(500)
                 except Exception as e:
-                    print(f"Ошибка при работе с чекбоксом {i+1}: {str(e)}")
+                    print(f"Пропускаем чекбокс {i+1}: не удалось обработать")
+            
+            if checked_count > 0:
+                print(f"Отмечено чекбоксов: {checked_count}")
             
             # Проверяем IP после обработки чекбоксов - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
             # await self.check_whoer_ip(page, "после_обработки_чекбоксов")
@@ -401,123 +564,79 @@ class TikTokManager:
             return False
     
     async def check_proxy_connection(self, page):
-        """Проверяет работу прокси, посещая сайты для проверки IP"""
+        """Проверяет работу прокси через ipinfo.io API"""
         try:
-            print("Проверка работы прокси...")
+            print("Проверка работы прокси через ipinfo.io...")
             
-            # Список сервисов для проверки IP
-            ip_services = [
-                {"url": "https://api.ipify.org", "name": "ipify.org"},
-                {"url": "https://ifconfig.me", "name": "ifconfig.me"},
-                {"url": "https://ipinfo.io/json", "name": "ipinfo.io"}
-            ]
+            ip_info = await self.get_ip_info_via_aiohttp()
             
-            # Проверяем IP через разные сервисы
-            ip_addresses = []
-            
-            for service in ip_services:
-                try:
-                    print(f"Проверка IP через {service['name']}...")
-                    await page.goto(service["url"], wait_until='load', timeout=30000)
-                    content = await page.content()
-                    
-                    # Сохраняем скриншот
-                    screenshot_name = f"proxy_check_{service['name'].replace('.', '_')}.png"
-                    await self.take_screenshot(page, screenshot_name)
-                    
-                    # Выводим результат
-                    print(f"Ответ от {service['name']}: {content[:200]}...")
-                    
-                    # Извлекаем IP из содержимого страницы
-                    ip = self.extract_ip_from_content(content, service["name"])
-                    if ip:
-                        print(f"Обнаружен IP через {service['name']}: {ip}")
-                        ip_addresses.append(ip)
-                    
-                except Exception as e:
-                    print(f"Ошибка при проверке через {service['name']}: {str(e)}")
-            
-            # Если мы получили хотя бы один IP адрес, считаем что прокси работает и не тратим время на whoer.com
-            if ip_addresses:
-                print(f"Прокси работает. Обнаруженные IP-адреса: {', '.join(str(ip) for ip in ip_addresses)}")
-                return True, ip_addresses
-
-            # Проверяем через whoer.com ТОЛЬКО если другие методы не сработали
-            try:
-                await page.goto("https://whoer.com", wait_until='load', timeout=30000)
-                await page.wait_for_timeout(5000)  # Ждем загрузку страницы
-                await self.take_screenshot(page, "proxy_check_whoer.png")
+            if ip_info:
+                ip = ip_info.get('ip')
+                country = ip_info.get('country', 'Неизвестно')
+                city = ip_info.get('city', 'Неизвестно')
+                org = ip_info.get('org', 'Неизвестно')
                 
-                # Пытаемся извлечь IP с whoer.com
-                ip_element = await page.query_selector(".your-ip")
-                if ip_element:
-                    ip_text = await ip_element.inner_text()
-                    print(f"IP от whoer.com: {ip_text}")
-                    # Извлекаем IP из текста
-                    ip = self.extract_ip_from_content(ip_text, "whoer.com")
-                    if ip:
-                        ip_addresses.append(ip)
-            except Exception as e:
-                print(f"Предупреждение: Не удалось проверить прокси через whoer.com: {str(e)}")
+                print(f"IP через прокси: {ip}")
+                print(f"Страна: {country}, Город: {city}")
+                print(f"Организация: {org}")
+                
+                if ip:
+                    return True, [ip]
             
-            # Если мы получили хотя бы один IP адрес (с whoer), считаем что прокси работает
-            if ip_addresses:
-                print(f"Прокси работает. Обнаруженные IP-адреса: {', '.join(str(ip) for ip in ip_addresses)}")
-                return True, ip_addresses
-            else:
-                print("Не удалось получить IP-адрес через прокси")
-                return False, []
+            print("Не удалось получить IP-адрес через прокси")
+            return False, []
                 
         except Exception as e:
             print(f"Ошибка при проверке прокси: {str(e)}")
             return False, []
     
-    def extract_ip_from_content(self, content, service_name):
+    async def get_ip_info_via_aiohttp(self, ip=None):
+        """Получает информацию об IP через ipinfo.io API с использованием aiohttp"""
+        try:
+            url = f"https://ipinfo.io/{ip}/json" if ip else "https://ipinfo.io/json"
+            headers = {
+                'Authorization': f'Bearer {config.IPINFO_TOKEN}'
+            }
+            
+            # Настраиваем прокси для aiohttp
+            proxy_url = None
+            proxy_auth = None
+            if self.proxy and self.proxy.get('server'):
+                proxy_url = self.proxy['server']
+                if self.proxy.get('username') and self.proxy.get('password'):
+                    proxy_auth = aiohttp.BasicAuth(
+                        self.proxy['username'],
+                        self.proxy['password']
+                    )
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, 
+                    headers=headers, 
+                    proxy=proxy_url,
+                    proxy_auth=proxy_auth,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    else:
+                        print(f"Ошибка ipinfo.io API: статус {response.status}")
+                        return None
+                        
+        except Exception as e:
+            print(f"Ошибка при запросе к ipinfo.io: {str(e)}")
+            return None
+    
+    def extract_ip_from_content(self, content, service_name=None):
         """Извлекает IP-адрес из содержимого страницы"""
         try:
-            # Для разных сервисов используем разные способы извлечения IP
-            if service_name == "ipify.org" or service_name == "ifconfig.me":
-                # Для этих сервисов содержимое - это просто IP-адрес
-                # Очищаем от HTML тегов и лишних пробелов
-                import re
-                ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', content)
-                if ip_match:
-                    return ip_match.group(0)
-                return content.strip()
-            
-            elif service_name == "ipinfo.io":
-                # Для ipinfo.io содержимое - это JSON
-                import json
-                import re
-                # Ищем JSON в содержимом
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(0)
-                    try:
-                        data = json.loads(json_str)
-                        return data.get("ip")
-                    except:
-                        # Если не удалось распарсить JSON, ищем IP в тексте
-                        ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', content)
-                        if ip_match:
-                            return ip_match.group(0)
-                
-                # Если не удалось найти JSON, ищем IP в тексте
-                ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', content)
-                if ip_match:
-                    return ip_match.group(0)
-            
-            elif service_name == "whoer.com":
-                # Для whoer.com извлекаем IP из текста
-                import re
-                ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', content)
-                if ip_match:
-                    return ip_match.group(0)
-            
+            import re
+            ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', content)
+            if ip_match:
+                return ip_match.group(0)
             return None
-        
         except Exception as e:
-            print(f"Ошибка при извлечении IP из содержимого {service_name}: {str(e)}")
+            print(f"Ошибка при извлечении IP: {str(e)}")
             return None
     
     def is_using_proxy(self, real_ip, proxy_ips):
@@ -543,40 +662,27 @@ class TikTokManager:
         return bool(re.match(ip_pattern, ip))
     
     async def check_real_ip(self):
-        """Проверяет реальный IP пользователя без использования прокси"""
+        """Проверяет реальный IP пользователя без использования прокси через ipinfo.io"""
         try:
-            print("Проверка реального IP пользователя...")
+            print("Проверка реального IP пользователя через ipinfo.io...")
             
-            async with async_playwright() as p:
-                # Запускаем браузер без прокси
-                browser = await p.firefox.launch(headless=False)
-                context = await browser.new_context()
-                page = await context.new_page()
-                
-                # Список сервисов для проверки IP
-                ip_services = [
-                    {"url": "https://api.ipify.org", "name": "ipify.org"}
-                ]
-                
-                real_ip = None
-                
-                for service in ip_services:
-                    try:
-                        print(f"Проверка реального IP через {service['name']}...")
-                        await page.goto(service["url"], wait_until='load', timeout=30000)
-                        content = await page.content()
-                        
-                        # Извлекаем IP из содержимого страницы
-                        # Для api.ipify.org содержимое - это просто IP-адрес
-                        real_ip = content.strip()
-                        print(f"Реальный IP: {real_ip}")
-                        break
-                        
-                    except Exception as e:
-                        print(f"Ошибка при проверке реального IP через {service['name']}: {str(e)}")
-                
-                await browser.close()
-                return real_ip
+            url = "https://ipinfo.io/json"
+            headers = {
+                'Authorization': f'Bearer {config.IPINFO_TOKEN}'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        real_ip = data.get('ip')
+                        country = data.get('country', 'Неизвестно')
+                        city = data.get('city', 'Неизвестно')
+                        print(f"Реальный IP: {real_ip} ({country}, {city})")
+                        return real_ip
+                    else:
+                        print(f"Ошибка ipinfo.io API: статус {response.status}")
+                        return None
                 
         except Exception as e:
             print(f"Ошибка при проверке реального IP: {str(e)}")
@@ -674,16 +780,6 @@ class TikTokManager:
         # Создаем директорию для скриншотов текущей сессии
         self.prepare_screenshot_directory(cookie_file)
         
-        # Переменные для хранения результатов проверки прокси
-        real_ip = None
-        proxy_ips_start = []
-        proxy_ips_end = []
-        
-        # Проверяем реальный IP пользователя
-        real_ip = await self.check_real_ip()
-        if real_ip:
-            print(f"Реальный IP пользователя: {real_ip}")
-        
         # Загружаем куки из файла
         cookies = self.cookies_loader.load_cookies(cookie_file)
         if not cookies:
@@ -726,28 +822,13 @@ class TikTokManager:
                 await context.add_cookies(cookies)
                 page = await context.new_page()
                 
-                # Проверяем работу прокси в начале
+                # Проверяем работу прокси в начале сессии
                 print("Проверка работы прокси в начале сессии...")
-                proxy_works_at_start, proxy_ips_start = await self.check_proxy_connection(page)
-                
-                # Дополнительная проверка через whoer.com в начале сессии - УБРАНО ДЛЯ ОПТИМИЗАЦИИ
-                # await self.check_whoer_ip(page, "начало_сессии")
-
-                
-                if proxy_works_at_start:
-                    # Проверяем, используется ли прокси или реальный IP
-                    is_proxy_used = self.is_using_proxy(real_ip, proxy_ips_start)
-                    
-                    if is_proxy_used is True:
-                        print("Прокси работает корректно, используется IP прокси.")
-                    elif is_proxy_used is False:
-                        print("ВНИМАНИЕ: Используется ваш реальный IP вместо прокси!")
-                    else:
-                        print("Не удалось определить, используется ли прокси или реальный IP.")
+                proxy_works, proxy_ips = await self.check_proxy_connection(page)
+                if proxy_works:
+                    print("Прокси работает корректно")
                 else:
-                    print("Предупреждение: Прокси не работает корректно в начале сессии")
-                    if real_ip:
-                        print("Проверьте, не используется ли ваш реальный IP вместо прокси!")
+                    print("Предупреждение: Прокси не работает корректно")
                 
                 # Проверяем авторизацию
                 is_authenticated = await self.check_authentication(page)
@@ -765,10 +846,6 @@ class TikTokManager:
                             print(f"Ошибка соединения при переходе на страницу загрузки: {upload_nav_error}")
                             print("Пропускаем обработку - эта ошибка не связана с валидностью куки")
                             self.mark_screenshot_directory(cookie_file, None)  # Не помечаем ни валидным, ни невалидным
-                            
-                            # Сохраняем отчет о прокси
-                            self.save_proxy_report(real_ip, proxy_ips_start, [])
-                            
                             return False
                         else:
                             # Другие ошибки навигации могут быть связаны с куки
@@ -789,38 +866,12 @@ class TikTokManager:
                     if upload_success:
                         print("Загрузка и публикация видео выполнены")
                         
-                        # Проверяем работу прокси в конце сессии
-                        print("Проверка работы прокси в конце сессии...")
+                        # Получаем никнейм пользователя и ссылку на видео
+                        username = await self.get_tiktok_username(page)
+                        video_url = await self.get_published_video_url(page)
                         
-                        # Дополнительная проверка через whoer.com перед финальной проверкой
-                        await self.check_whoer_ip(page, "перед_финальной_проверкой")
-                        
-                        proxy_works_at_end, proxy_ips_end = await self.check_proxy_connection(page)
-                        
-                        # Финальная проверка через whoer.com
-                        await self.check_whoer_ip(page, "финальная_проверка")
-                        
-                        if proxy_works_at_end:
-                            # Проверяем, используется ли прокси или реальный IP
-                            is_proxy_used = self.is_using_proxy(real_ip, proxy_ips_end)
-                            
-                            if is_proxy_used is True:
-                                print("Прокси работает корректно в конце сессии, используется IP прокси.")
-                                await self.take_screenshot(page, "proxy_check_end.png")
-                            elif is_proxy_used is False:
-                                print("ВНИМАНИЕ: В конце сессии используется ваш реальный IP вместо прокси!")
-                                await self.take_screenshot(page, "proxy_check_end_failed.png")
-                            else:
-                                print("Не удалось определить, используется ли прокси или реальный IP в конце сессии.")
-                                await self.take_screenshot(page, "proxy_check_end.png")
-                        else:
-                            print("Предупреждение: Прокси не работает корректно в конце сессии")
-                            await self.take_screenshot(page, "proxy_check_end_failed.png")
-                            if real_ip:
-                                print("Проверьте, не используется ли ваш реальный IP вместо прокси!")
-                        
-                        # Сохраняем отчет о прокси
-                        self.save_proxy_report(real_ip, proxy_ips_start, proxy_ips_end)
+                        # Сохраняем результат загрузки в JSON
+                        self.save_upload_result(cookie_file, username, video_url)
                         
                         self.cookies_loader.mark_cookie_as_valid(cookie_file)
                         self.mark_screenshot_directory(cookie_file, True)
@@ -830,25 +881,11 @@ class TikTokManager:
                     else:
                         print("Не удалось загрузить или опубликовать видео")
                         
-                        # Проверяем работу прокси в конце сессии даже при неудаче загрузки
-                        print("Проверка работы прокси после неудачной загрузки...")
-                        proxy_works_at_end, proxy_ips_end = await self.check_proxy_connection(page)
-                        
-                        # Сохраняем отчет о прокси
-                        self.save_proxy_report(real_ip, proxy_ips_start, proxy_ips_end)
-                        
                         self.cookies_loader.mark_cookie_as_invalid(cookie_file)
                         self.mark_screenshot_directory(cookie_file, False)
                         return False
                 else:
                     print("Не удалось авторизоваться с данными куками")
-                    
-                    # Проверяем работу прокси в конце сессии даже при неудаче авторизации
-                    print("Проверка работы прокси после неудачной авторизации...")
-                    proxy_works_at_end, proxy_ips_end = await self.check_proxy_connection(page)
-                    
-                    # Сохраняем отчет о прокси
-                    self.save_proxy_report(real_ip, proxy_ips_start, proxy_ips_end)
                     
                     self.cookies_loader.mark_cookie_as_invalid(cookie_file)
                     self.mark_screenshot_directory(cookie_file, False)
@@ -863,18 +900,12 @@ class TikTokManager:
                 traceback.print_exc()
                 print("Пропускаем обработку - эта ошибка не связана с валидностью куки")
                 
-                # Сохраняем отчет о прокси с имеющимися данными
-                self.save_proxy_report(real_ip, proxy_ips_start, [])
-                
                 self.mark_screenshot_directory(cookie_file, None)
                 return False
             else:
                 # Для других ошибок помечаем куки как невалидный
                 print(f"Ошибка при обработке куков {cookie_file}: {str(e)}")
                 traceback.print_exc()
-                
-                # Сохраняем отчет о прокси с имеющимися данными
-                self.save_proxy_report(real_ip, proxy_ips_start, [])
                 
                 self.cookies_loader.mark_cookie_as_invalid(cookie_file)
                 self.mark_screenshot_directory(cookie_file, False)
@@ -1127,15 +1158,72 @@ class TikTokManager:
             await self.take_screenshot(page, "cookie_consent_error.png")
             return False
     
+    async def handle_content_check_modal(self, page):
+        """Обрабатывает модальное окно 'Включить автоматическую проверку контента?' - нажимает Отмена"""
+        try:
+            print("Проверяем наличие окна 'Включить автоматическую проверку контента'...")
+            
+            # Ищем окно по заголовку
+            modal_title = await page.query_selector('text="Включить автоматическую проверку контента?"')
+            
+            if modal_title:
+                print("Найдено окно 'Включить автоматическую проверку контента'")
+                await self.take_screenshot(page, "content_check_modal_found.png")
+                
+                # Ищем кнопку "Отмена" - несколько способов
+                cancel_selectors = [
+                    'button:has-text("Отмена")',
+                    'div[role="button"]:has-text("Отмена")',
+                    'span:has-text("Отмена")',
+                    '.TUXButton:has-text("Отмена")',
+                ]
+                
+                for selector in cancel_selectors:
+                    cancel_button = await page.query_selector(selector)
+                    if cancel_button:
+                        print(f"Найдена кнопка 'Отмена', нажимаем...")
+                        await cancel_button.click()
+                        await page.wait_for_timeout(1000)
+                        print("Окно автоматической проверки контента закрыто")
+                        await self.take_screenshot(page, "content_check_modal_closed.png")
+                        return True
+                
+                # Если кнопка "Отмена" не найдена, пробуем закрыть крестиком
+                close_button = await page.query_selector('[aria-label="Close"], [aria-label="Закрыть"], button svg, .modal-close')
+                if close_button:
+                    print("Кнопка 'Отмена' не найдена, закрываем крестиком...")
+                    await close_button.click()
+                    await page.wait_for_timeout(1000)
+                    return True
+                    
+                print("Не удалось найти кнопку для закрытия окна")
+                return False
+            else:
+                print("Окно 'Включить автоматическую проверку контента' не найдено")
+                return False
+                
+        except Exception as e:
+            print(f"Ошибка при обработке окна автоматической проверки контента: {str(e)}")
+            return False
+
     async def handle_info_modals(self, page):
         """Обрабатывает информационные модальные окна с кнопкой 'Понятно'"""
         try:
+            # Сначала проверяем окно автоматической проверки контента
+            await self.handle_content_check_modal(page)
+            
             print("Проверяем наличие информационных модальных окон...")
             
             modals_closed = 0
             max_attempts = 5  # Максимум попыток закрыть модальные окна
             
             for attempt in range(max_attempts):
+                # Проверяем окно автоматической проверки контента на каждой итерации
+                content_check_closed = await self.handle_content_check_modal(page)
+                if content_check_closed:
+                    modals_closed += 1
+                    continue
+                
                 # Ищем кнопку "Понятно" в модальных окнах
                 # Способ 1: По тексту кнопки
                 ponyatno_button = await page.query_selector('button:has-text("Понятно"), div.Button__content:has-text("Понятно")')
@@ -1163,16 +1251,13 @@ class TikTokManager:
                         await page.wait_for_timeout(1000)
                         continue
                 
-                # Способ 3: Ищем кнопки "Включить" или "Отмена" в диалоге автоматической проверки контента
-                enable_button = await page.query_selector('button:has-text("Включить")')
+                # Способ 3: Ищем кнопки "Включить" или "Отмена" в других диалогах
                 cancel_button = await page.query_selector('button:has-text("Отмена")')
                 
-                if enable_button or cancel_button:
-                    # Предпочитаем нажать "Отмена" чтобы не включать лишние функции
-                    button_to_click = cancel_button if cancel_button else enable_button
-                    button_text = await button_to_click.inner_text()
-                    print(f"Найдена кнопка '{button_text}' в диалоге (попытка {attempt + 1})")
-                    await button_to_click.click()
+                if cancel_button:
+                    # Нажимаем "Отмена" чтобы не включать лишние функции
+                    print(f"Найдена кнопка 'Отмена' в диалоге (попытка {attempt + 1})")
+                    await cancel_button.click()
                     modals_closed += 1
                     await page.wait_for_timeout(1000)
                     continue
@@ -1202,45 +1287,22 @@ class TikTokManager:
             return False
     
     async def check_whoer_ip(self, page, stage_name=""):
-        """Проверяет IP только через whoer.com на определенном этапе"""
+        """Проверяет IP через ipinfo.io API на определенном этапе"""
         try:
-            print(f"\n=== Проверка IP через whoer.com на этапе: {stage_name} ===")
-            # Сохраняем текущий URL, чтобы вернуться к нему после проверки
-            current_url = page.url
+            print(f"\n=== Проверка IP через ipinfo.io на этапе: {stage_name} ===")
             
-            await page.goto("https://whoer.com", wait_until='load', timeout=30000)
-            await page.wait_for_timeout(5000)  # Ждем загрузку страницы
+            ip_info = await self.get_ip_info_via_aiohttp()
             
-            # Сохраняем скриншот с указанием этапа
-            screenshot_name = f"proxy_check_whoer_{stage_name.replace(' ', '_')}.png"
-            await self.take_screenshot(page, screenshot_name)
+            if ip_info:
+                ip = ip_info.get('ip')
+                country = ip_info.get('country', 'Неизвестно')
+                city = ip_info.get('city', 'Неизвестно')
+                
+                print(f"IP на этапе '{stage_name}': {ip} ({country}, {city})")
+                return ip
             
-            # Пытаемся извлечь IP с whoer.com
-            ip_element = await page.query_selector(".your-ip")
-            ip = None
-            if ip_element:
-                ip_text = await ip_element.inner_text()
-                print(f"IP от whoer.com на этапе '{stage_name}': {ip_text}")
-                # Извлекаем IP из текста
-                ip = self.extract_ip_from_content(ip_text, "whoer.com")
-                if ip:
-                    print(f"Обнаружен IP: {ip}")
-            
-            # Возвращаемся на предыдущую страницу
-            if current_url and current_url != "about:blank":
-                await page.goto(current_url, wait_until='load', timeout=30000)
-                await page.wait_for_timeout(2000)  # Даем время для загрузки
-            
-            return ip
+            return None
             
         except Exception as e:
-            print(f"Ошибка при проверке IP через whoer.com на этапе '{stage_name}': {str(e)}")
-            
-            # Пытаемся вернуться на предыдущую страницу в случае ошибки
-            try:
-                if current_url and current_url != "about:blank":
-                    await page.goto(current_url, wait_until='load', timeout=30000)
-            except:
-                pass
-                
+            print(f"Ошибка при проверке IP на этапе '{stage_name}': {str(e)}")
             return None 

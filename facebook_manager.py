@@ -5,14 +5,14 @@ import traceback
 import datetime
 from playwright.async_api import async_playwright
 import aiohttp
-from instagram_cookies_loader import InstagramCookiesLoader
+from facebook_cookies_loader import FacebookCookiesLoader
 import config
 
-class InstagramManager:
-    def __init__(self, cookies_dir='instagram_cookies', screenshots_dir='instagram_screenshots'):
+class FacebookManager:
+    def __init__(self, cookies_dir='facebook_cookies', screenshots_dir='facebook_screenshots'):
         self.cookies_dir = cookies_dir
         self.screenshots_dir = screenshots_dir
-        self.cookies_loader = InstagramCookiesLoader(cookies_dir)
+        self.cookies_loader = FacebookCookiesLoader(cookies_dir)
         self.current_screenshot_dir = None
         self.proxy = config.PROXY
         self.proxy_refresh_url = config.PROXY_REFRESH_URL
@@ -32,7 +32,7 @@ class InstagramManager:
         print(f"Создана директория для скриншотов: {screenshot_dir}")
         return screenshot_dir
     
-    def mark_screenshot_directory(self, cookie_file, is_valid):
+    def mark_screenshot_directory(self, cookie_file, status):
         """Переименовывает директорию скриншотов со статусом"""
         if not self.current_screenshot_dir or not os.path.exists(self.current_screenshot_dir):
             return
@@ -40,18 +40,22 @@ class InstagramManager:
         base_dir = os.path.dirname(self.current_screenshot_dir)
         current_dir_name = os.path.basename(self.current_screenshot_dir)
         
-        if is_valid is None:
-            status = "skipped"
+        if status is None:
+            status_str = "skipped"
+        elif status == "password":
+            status_str = "password"
+        elif status is True:
+            status_str = "valid"
         else:
-            status = "valid" if is_valid else "invalid"
+            status_str = "invalid"
             
-        new_dir_name = f"{status}_{current_dir_name}"
+        new_dir_name = f"{status_str}_{current_dir_name}"
         new_dir_path = os.path.join(base_dir, new_dir_name)
         
         try:
             os.rename(self.current_screenshot_dir, new_dir_path)
             self.current_screenshot_dir = new_dir_path
-            print(f"Директория скриншотов помечена как {status}")
+            print(f"Директория скриншотов помечена как {status_str}")
         except Exception as e:
             print(f"Ошибка при переименовании директории: {str(e)}")
     
@@ -68,7 +72,7 @@ class InstagramManager:
         except Exception as e:
             print(f"Ошибка при сохранении скриншота: {str(e)}")
             return None
-    
+
     async def refresh_proxy_ip(self):
         """Обновляет IP-адрес прокси"""
         try:
@@ -98,7 +102,6 @@ class InstagramManager:
                 'Authorization': f'Bearer {config.IPINFO_TOKEN}'
             }
             
-            # Настраиваем прокси для aiohttp
             proxy_url = None
             proxy_auth = None
             if self.proxy and self.proxy.get('server'):
@@ -158,13 +161,16 @@ class InstagramManager:
         """Обрабатывает диалог согласия на cookie"""
         try:
             consent_selectors = [
+                'button[data-cookiebanner="accept_button"]',
                 'button:has-text("Allow all cookies")',
                 'button:has-text("Allow essential and optional cookies")',
-                'button:has-text("Accept")',
                 'button:has-text("Accept All")',
-                'button:has-text("Принять")',
+                'button:has-text("Accept")',
+                'button:has-text("Принять все")',
+                'button:has-text("Разрешить все")',
                 'button:has-text("Разрешить")',
                 '[data-testid="cookie-policy-manage-dialog-accept-button"]',
+                'button[title="Allow all cookies"]',
             ]
             
             for selector in consent_selectors:
@@ -183,64 +189,149 @@ class InstagramManager:
             return False
 
     async def check_authentication(self, page):
-        """Проверяет, авторизован ли пользователь на Instagram"""
+        """Проверяет, авторизован ли пользователь на Facebook
+        Возвращает: 'valid', 'invalid', или 'password'
+        """
         try:
-            print("Проверка авторизации на Instagram...")
+            print("Проверка авторизации на Facebook...")
             
-            # Переходим на главную страницу Instagram
-            await page.goto("https://www.instagram.com/", wait_until='domcontentloaded', timeout=60000)
+            # Переходим на главную страницу Facebook
+            await page.goto("https://www.facebook.com/", wait_until='domcontentloaded', timeout=60000)
             
             print("Ожидание загрузки страницы...")
             await page.wait_for_timeout(5000)
             
-            await self.take_screenshot(page, "instagram_main_page.png")
+            await self.take_screenshot(page, "facebook_main_page.png")
             
             # Обрабатываем cookie consent
             await self.handle_cookie_consent(page)
             await page.wait_for_timeout(2000)
             
             current_url = page.url
+            page_content = await page.content()
             
-            # Проверка на страницу подтверждения пароля (сессия валидна, но требует подтверждения)
-            password_confirm_selectors = [
-                'input[name="password"]:not([name="username"])',  # Только поле пароля без username
-                'button:has-text("Confirm")',
-                'button:has-text("Подтвердить")',
+            # Проверка на страницу checkpoint/подтверждения
+            checkpoint_indicators = ['/checkpoint/', '/login/identify', 'checkpoint', 'confirm_identity']
+            is_checkpoint = any(x in current_url for x in checkpoint_indicators)
+            
+            if is_checkpoint:
+                print("Обнаружена страница проверки безопасности (checkpoint)")
+                await self.take_screenshot(page, "facebook_checkpoint.png")
+                return 'valid'
+            
+            # === ПРОВЕРКА НА СТРАНИЦУ С ЗАПРОСОМ ПАРОЛЯ ===
+            # Признаки: есть фото/имя пользователя + поле только для пароля (без email)
+            
+            # Селекторы для страницы "Недавние входы" с запросом пароля
+            password_page_selectors = [
+                # Модальное окно с запросом пароля (второй скриншот)
+                'div[role="dialog"] input[type="password"]',
+                # Страница с недавними входами
+                'div[data-testid="royal_login_form"]',
             ]
             
-            # Проверяем URL на признаки подтверждения (challenge, verify, confirm)
-            is_password_confirm = any(x in current_url for x in ['/challenge/', '/verify/', '/confirm', 'suspicious'])
-            
-            # Проверяем наличие только поля пароля (без username) - признак подтверждения
+            # Проверяем наличие поля пароля БЕЗ поля email (признак страницы подтверждения)
             has_password_only = False
-            password_field = await page.query_selector('input[name="password"]')
-            username_field = await page.query_selector('input[name="username"]')
-            if password_field and not username_field:
-                has_password_only = True
-                print("Обнаружена форма подтверждения пароля (сессия валидна)")
-                is_password_confirm = True
+            password_field = await page.query_selector('input[type="password"], input[name="pass"]')
+            email_field = await page.query_selector('input[name="email"]')
             
-            if is_password_confirm:
-                print("Сессия валидна, но требует подтверждения пароля")
-                await self.take_screenshot(page, "instagram_password_confirm.png")
-                return True  # Считаем валидным - сессия есть, просто нужно подтверждение
+            if password_field:
+                password_visible = await password_field.is_visible()
+                email_visible = False
+                if email_field:
+                    email_visible = await email_field.is_visible()
+                
+                # Если есть видимое поле пароля, но нет видимого поля email
+                if password_visible and not email_visible:
+                    has_password_only = True
+                    print("Обнаружено поле пароля без поля email")
             
-            # Селекторы признаков авторизации
-            auth_selectors = [
-                'svg[aria-label="Home"]',
-                'svg[aria-label="Главная"]',
-                'a[href="/direct/inbox/"]',
-                'svg[aria-label="New post"]',
-                'svg[aria-label="Новая публикация"]',
-                'svg[aria-label="Search"]',
-                'span[aria-label="Profile"]',
-                'img[data-testid="user-avatar"]',
-                'a[href*="/accounts/edit/"]',
+            # Проверяем наличие аватара/фото пользователя на странице входа
+            user_avatar_selectors = [
+                'img[data-testid="royal_login_profile_pic"]',
+                'div[data-testid="royal_login_form"] img',
+                'div[role="dialog"] img[src*="profile"]',
+                'img[alt][src*="scontent"]',  # Фото профиля Facebook
             ]
             
-            # Селекторы формы входа (признак отсутствия авторизации - есть И username И password)
-            login_form_indicators = [
-                'input[name="username"]',
+            has_user_avatar = False
+            for selector in user_avatar_selectors:
+                try:
+                    avatar = await page.query_selector(selector)
+                    if avatar:
+                        is_visible = await avatar.is_visible()
+                        if is_visible:
+                            has_user_avatar = True
+                            print(f"Найден аватар пользователя: {selector}")
+                            break
+                except:
+                    continue
+            
+            # === СНАЧАЛА ПРОВЕРЯЕМ ПОЛНУЮ ФОРМУ ВХОДА (email + password) ===
+            # Это означает что сессия НЕ распознана вообще = invalid
+            has_full_login_form = False
+            if email_field and password_field:
+                email_visible = await email_field.is_visible()
+                password_visible = await password_field.is_visible()
+                if email_visible and password_visible:
+                    print("Найдена полная форма входа (email + password) - сессия не распознана")
+                    await self.take_screenshot(page, "facebook_not_authenticated.png")
+                    return 'invalid'
+            
+            # Проверка через URL на страницу входа
+            if '/login' in current_url or 'login.php' in current_url:
+                # Проверяем, есть ли полная форма входа
+                if email_field:
+                    email_visible = await email_field.is_visible() if email_field else False
+                    if email_visible:
+                        print("Перенаправлены на страницу входа с полной формой")
+                        await self.take_screenshot(page, "facebook_not_authenticated.png")
+                        return 'invalid'
+            
+            # === ТЕПЕРЬ ПРОВЕРЯЕМ СТРАНИЦУ С ЗАПРОСОМ ТОЛЬКО ПАРОЛЯ ===
+            # Если есть аватар + поле пароля без email = требуется пароль (сессия частично распознана)
+            if has_user_avatar and has_password_only:
+                print("Сессия распознана, но требуется ввод пароля")
+                await self.take_screenshot(page, "facebook_password_required.png")
+                return 'password'
+            
+            # Проверяем текст "Недавние входы" (без "Забыли пароль?" - он есть на всех страницах)
+            recent_login_indicators = [
+                'Недавние входы',
+                'Recent logins',
+            ]
+            
+            has_recent_login_text = any(text in page_content for text in recent_login_indicators)
+            
+            # Если есть текст "Недавние входы" + поле только пароля = требуется пароль
+            if has_recent_login_text and has_password_only:
+                print("Страница недавних входов - требуется пароль")
+                await self.take_screenshot(page, "facebook_password_required.png")
+                return 'password'
+            
+            # === ПРОВЕРКА ПОЛНОЙ АВТОРИЗАЦИИ ===
+            
+            # Селекторы признаков авторизации на Facebook
+            auth_selectors = [
+                'div[role="navigation"]',
+                'a[href="/me/"]',
+                'a[aria-label="Home"]',
+                'a[aria-label="Главная"]',
+                'div[aria-label="Your profile"]',
+                'div[aria-label="Ваш профиль"]',
+                'svg[aria-label="Your profile"]',
+                'a[href*="/friends"]',
+                'a[href="/marketplace/"]',
+                'a[href="/watch/"]',
+                'a[href="/groups/"]',
+                'div[aria-label="Messenger"]',
+                'div[aria-label="Notifications"]',
+                'div[aria-label="Уведомления"]',
+                'div[aria-label="Account"]',
+                'div[aria-label="Аккаунт"]',
+                'input[placeholder="Search Facebook"]',
+                'input[placeholder="Поиск на Facebook"]',
+                'div[data-pagelet="LeftRail"]',
             ]
             
             # Проверяем признаки авторизации
@@ -255,48 +346,35 @@ class InstagramManager:
                 except:
                     continue
             
-            # Проверяем наличие полной формы входа (username + password)
-            has_login_form = False
-            if username_field and password_field:
-                print("Найдена полная форма входа (username + password)")
-                has_login_form = True
-            
-            # Дополнительная проверка через URL
-            if '/accounts/login' in current_url:
-                print("Перенаправлены на страницу входа")
-                has_login_form = True
-                is_authenticated = False
-            
             # Проверка через HTML контент
-            page_content = await page.content()
-            auth_indicators = [
-                '"viewer":{',
-                '"isLoggedIn":true',
-                'viewerId',
+            auth_html_indicators = [
+                '"USER_ID":"',
+                '"actorID":"',
+                '"viewerID":',
             ]
             
-            for indicator in auth_indicators:
+            for indicator in auth_html_indicators:
                 if indicator in page_content:
                     print(f"Найден признак авторизации в HTML: {indicator}")
                     is_authenticated = True
                     break
             
             # Финальное решение
-            if is_authenticated and not has_login_form:
-                print("Пользователь авторизован на Instagram")
-                await self.take_screenshot(page, "instagram_authenticated.png")
-                return True
+            if is_authenticated:
+                print("Пользователь авторизован на Facebook")
+                await self.take_screenshot(page, "facebook_authenticated.png")
+                return 'valid'
             else:
-                print("Пользователь НЕ авторизован на Instagram")
-                await self.take_screenshot(page, "instagram_not_authenticated.png")
-                return False
+                print("Пользователь НЕ авторизован на Facebook")
+                await self.take_screenshot(page, "facebook_not_authenticated.png")
+                return 'invalid'
                 
         except Exception as e:
             print(f"Ошибка при проверке авторизации: {str(e)}")
             traceback.print_exc()
-            await self.take_screenshot(page, "instagram_auth_error.png")
-            return False
-    
+            await self.take_screenshot(page, "facebook_auth_error.png")
+            return 'invalid'
+
     async def process_account(self, cookie_file):
         """Обрабатывает один файл с куками - только проверка авторизации"""
         print(f"\n{'='*50}")
@@ -326,7 +404,7 @@ class InstagramManager:
             print(f"Не удалось загрузить куки из файла {cookie_file}")
             self.cookies_loader.mark_cookie_as_invalid(cookie_file)
             self.mark_screenshot_directory(cookie_file, False)
-            return False
+            return 'invalid'
         
         print(f"Настройки прокси: {self.proxy['server']}")
         
@@ -345,22 +423,27 @@ class InstagramManager:
                 page = await context.new_page()
                 
                 # Проверяем авторизацию
-                is_authenticated = await self.check_authentication(page)
+                auth_result = await self.check_authentication(page)
                 
                 # Закрываем браузер
                 await browser.close()
                 
-                # Помечаем файл
-                if is_authenticated:
+                # Помечаем файл в зависимости от результата
+                if auth_result == 'valid':
                     self.cookies_loader.mark_cookie_as_valid(cookie_file)
                     self.mark_screenshot_directory(cookie_file, True)
                     print("Результат: ВАЛИДНЫЙ")
-                    return True
+                    return 'valid'
+                elif auth_result == 'password':
+                    self.cookies_loader.mark_cookie_as_password(cookie_file)
+                    self.mark_screenshot_directory(cookie_file, "password")
+                    print("Результат: ТРЕБУЕТСЯ ПАРОЛЬ")
+                    return 'password'
                 else:
                     self.cookies_loader.mark_cookie_as_invalid(cookie_file)
                     self.mark_screenshot_directory(cookie_file, False)
                     print("Результат: НЕВАЛИДНЫЙ")
-                    return False
+                    return 'invalid'
         
         except Exception as e:
             error_text = str(e).lower()
@@ -369,10 +452,10 @@ class InstagramManager:
                 print(f"Ошибка соединения: {e}")
                 print("Пропускаем - ошибка не связана с валидностью куки")
                 self.mark_screenshot_directory(cookie_file, None)
-                return False
+                return 'skipped'
             else:
                 print(f"Ошибка при обработке: {str(e)}")
                 traceback.print_exc()
                 self.cookies_loader.mark_cookie_as_invalid(cookie_file)
                 self.mark_screenshot_directory(cookie_file, False)
-                return False
+                return 'invalid'
